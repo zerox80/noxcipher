@@ -65,7 +65,9 @@ class FileBrowserActivity : AppCompatActivity() {
                         val fileName = files[position]
                         if (fileName.endsWith("/")) {
                             // Directory navigation
-                            currentPath = if (currentPath == "/") "/$fileName" else "$currentPath/$fileName".replace("//", "/")
+                            // Bug 9 Fix: Use java.io.File for robust path construction
+                            val newFile = java.io.File(currentPath, fileName)
+                            currentPath = if (newFile.absolutePath.endsWith("/")) newFile.absolutePath else "${newFile.absolutePath}/"
                             // Remove trailing slash for path construction if needed, but Rust might expect it or not.
                             // Let's keep it simple: if we append "dir/", we get "/dir/".
                             // Actually, we should probably clean it up.

@@ -26,9 +26,14 @@ object FileUtils {
         return controlChars == 0 || (controlChars.toFloat() / limit.toFloat() < 0.05)
     }
 
+    private val HEX_CHARS = "0123456789abcdef".toCharArray()
+
     fun toHex(bytes: ByteArray, sb: StringBuilder) {
+        // Bug 7 Fix: Optimized hex conversion
         for (b in bytes) {
-            sb.append(String.format("%02x", b.toInt() and 0xFF))
+            val v = b.toInt() and 0xFF
+            sb.append(HEX_CHARS[v ushr 4])
+            sb.append(HEX_CHARS[v and 0x0F])
         }
     }
 }

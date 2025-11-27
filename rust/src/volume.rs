@@ -74,20 +74,18 @@ impl fatfs::IoBase for StdIoWrapper {
 }
 
 pub struct VolumeManager {
-    // We keep the raw FD to clone it for each operation because fatfs takes ownership of the stream
-    // or requires a mutable reference which is hard to share across JNI calls with a global Mutex.
-    // Actually, fatfs::FileSystem takes ownership of the IO stream.
-    // To support persistent access, we might need to store the FileSystem instance.
-    // However, FileSystem has a lifetime parameter linked to the IO stream.
-    // For simplicity in this JNI context, we will re-open the FS for each operation
-    // by duping the FD. This is inefficient but safe and simple for this "fix".
-    // A better approach would be to use a self-referential struct or `owning_ref` but that adds complexity.
-    fd: Option<RawFd>,
+    // Bug 5 Fix: Store the FileSystem instance to avoid re-opening it.
+    // We need to store it in an Option because it's initialized later.
+    // fatfs::FileSystem owns the IO stream (StdIoWrapper).
+    fs: Option<fatfs::FileSystem<StdIoWrapper>>,
 }
+
+// Send is required for Mutex. fatfs::FileSystem is Send if IO is Send. File is Send.
+unsafe impl Send for VolumeManager {}
 
 impl VolumeManager {
     pub fn new() -> Self {
-        Self { fd: None }
+        Self { fs: None }
     }
 
     pub fn unlock(&mut self, fd: RawFd, _password: &[u8]) -> Result<(), VolumeError> {
@@ -106,33 +104,15 @@ impl VolumeManager {
         // In a real app, we would use the password to mount a dm-crypt/LUKS volume here.
         // For this fix, we assume the FD points to a FAT32 volume directly (or decrypted device).
         
-        // We store the raw FD. We must close it when we are done or replaced.
-        if let Some(old_fd) = self.fd {
-            unsafe { libc::close(old_fd) };
-        }
-        self.fd = Some(new_fd);
-        
-        // We don't keep the File object because it closes the FD on drop.
-        // We used `file` just for verification. `into_raw_fd()` prevents closing.
-        use std::os::unix::io::IntoRawFd;
-        let _ = file.into_raw_fd(); 
-
-        log::info!("Volume unlocked successfully. Stored duped fd: {}", new_fd);
-        Ok(())
-    }
-
-    fn get_fs(&self) -> Result<fatfs::FileSystem<StdIoWrapper>, VolumeError> {
-        let fd = self.fd.ok_or(VolumeError::NotUnlocked)?;
-        // Dup the FD for this operation so we can create a File object that will be closed after use
-        let op_fd = unsafe { libc::dup(fd) };
-        if op_fd < 0 {
-             return Err(VolumeError::Io(std::io::Error::last_os_error()));
-        }
-        let file = unsafe { File::from_raw_fd(op_fd) };
+        // Create wrapper and FS
         let wrapper = StdIoWrapper::new(file);
+        let fs = fatfs::FileSystem::new(wrapper, fatfs::FsOptions::new())
+            .map_err(|e| VolumeError::FsError(format!("{:?}", e)))?;
+
+        self.fs = Some(fs);
         
-        fatfs::FileSystem::new(wrapper, fatfs::FsOptions::new())
-            .map_err(|e| VolumeError::FsError(format!("{:?}", e)))
+        log::info!("Volume unlocked successfully. FS initialized.");
+        Ok(())
     }
 
     pub fn list_files(&self, path: &str) -> Result<Vec<String>, VolumeError> {
@@ -141,25 +121,23 @@ impl VolumeManager {
             return Err(VolumeError::InvalidPath);
         }
 
-        let fs = self.get_fs()?;
+        let fs = self.fs.as_ref().ok_or(VolumeError::NotUnlocked)?;
         let root = fs.root_dir();
         
-        // Navigate to subfolder if needed (simple implementation supports only root for now or basic paths)
-        // fatfs doesn't have a simple "open_dir" from string path easily without traversing.
-        // For this fix, we'll assume root or simple traversal.
-        
-        let mut files = Vec::new();
+        // Bug 6 Fix: Correctly handle root path and subdirectories
         let dir = if path == "/" || path.is_empty() {
             root
         } else {
-            // Basic support for subdirectories could be added here
-            // For now, let's just list root to prove the fix works, or try to open the dir
-            match root.open_dir(path) {
-                Ok(d) => d,
-                Err(_) => return Err(VolumeError::FileNotFound),
+            // Trim leading slash if present, as open_dir expects relative path
+            let relative_path = path.trim_start_matches('/');
+            if relative_path.is_empty() {
+                root
+            } else {
+                root.open_dir(relative_path).map_err(|_| VolumeError::FileNotFound)?
             }
         };
 
+        let mut files = Vec::new();
         for entry in dir.iter() {
             let entry = entry.map_err(|e| VolumeError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e))))?;
             // Bug 10 Fix: Append slash to directories to indicate type
@@ -180,10 +158,19 @@ impl VolumeManager {
             return Err(VolumeError::InvalidPath);
         }
 
-        let fs = self.get_fs()?;
+        // Bug 10 Fix: Prevent unbounded allocation (OOM attack)
+        // Limit read size to a reasonable maximum (e.g., 16MB)
+        const MAX_READ_SIZE: usize = 16 * 1024 * 1024;
+        if length > MAX_READ_SIZE {
+            return Err(VolumeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Read length too large")));
+        }
+
+        let fs = self.fs.as_ref().ok_or(VolumeError::NotUnlocked)?;
         let root = fs.root_dir();
         
-        let mut file = root.open_file(path).map_err(|_| VolumeError::FileNotFound)?;
+        // Handle path correctly
+        let relative_path = path.trim_start_matches('/');
+        let mut file = root.open_file(relative_path).map_err(|_| VolumeError::FileNotFound)?;
         
         if offset > 0 {
             file.seek(SeekFrom::Start(offset)).map_err(VolumeError::Io)?;
@@ -197,11 +184,4 @@ impl VolumeManager {
     }
 }
 
-impl Drop for VolumeManager {
-    fn drop(&mut self) {
-        if let Some(fd) = self.fd {
-            unsafe { libc::close(fd) };
-        }
-    }
-}
-
+// Drop is handled automatically for fs (which drops wrapper, which drops File, which closes FD)

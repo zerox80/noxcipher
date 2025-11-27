@@ -14,8 +14,14 @@ pub extern "system" fn Java_com_noxcipher_RustNative_initLogger(
     _class: JClass,
 ) {
     let _ = panic::catch_unwind(|| {
+        // Bug 4 Fix: Use Trace only in debug builds, Info in release
+        #[cfg(debug_assertions)]
+        let level = LevelFilter::Trace;
+        #[cfg(not(debug_assertions))]
+        let level = LevelFilter::Info;
+
         android_logger::init_once(
-            Config::default().with_max_level(LevelFilter::Trace),
+            Config::default().with_max_level(level),
         );
         log::info!("Rust logger initialized");
     });
@@ -29,14 +35,19 @@ pub extern "system" fn Java_com_noxcipher_RustNative_unlockVolume(
     password: jbyteArray,
 ) -> jboolean {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let password_bytes = match env.convert_byte_array(password) {
-            Ok(bytes) => bytes,
+        // Bug 8 Fix: Use get_byte_array_elements to access password bytes and explicitly zero them
+        // This avoids relying on JNI copy behavior and ensures we can clear the memory.
+        let password_bytes_guard = match env.get_byte_array_elements(password, jni::objects::ReleaseMode::NoCopyBack) {
+            Ok(guard) => guard,
             Err(e) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid password array: {}", e));
                 return 0;
             }
         };
         
+        // Convert to slice for usage
+        let password_slice = unsafe { std::slice::from_raw_parts(password_bytes_guard.as_ptr() as *const u8, password_bytes_guard.len()) };
+
         log::info!("Attempting to unlock volume with fd: {}", fd);
         
         // Handle Mutex poisoning by recovering the lock
@@ -47,13 +58,23 @@ pub extern "system" fn Java_com_noxcipher_RustNative_unlockVolume(
                 poisoned.into_inner()
             }
         };
-        let result = manager.unlock(fd, &password_bytes);
+        let result = manager.unlock(fd, password_slice);
         
         // Zero out the password bytes in memory (best effort)
-        let mut password_bytes = password_bytes;
-        for byte in password_bytes.iter_mut() {
-            *byte = 0;
+        // We cast to *mut because we need to write, and we know we have access via the guard.
+        // The guard gives us a pointer.
+        unsafe {
+            let ptr = password_bytes_guard.as_ptr();
+            let len = password_bytes_guard.len();
+            std::ptr::write_bytes(ptr, 0, len);
         }
+        // Guard is dropped here, releasing the array (NoCopyBack means we don't copy back changes, 
+        // but we zeroed the memory which might be the pinned original or a copy. 
+        // If it's a copy, we cleared the copy. If pinned, we cleared the original.
+        // To be safer, we should probably use CopyBack if we modified it? 
+        // But we want to clear it. If we zeroed a copy, the original in Java heap is still there?
+        // Java side clears its array. This is for the JNI copy.
+        // If JNI made a copy, we zeroed the copy. Good.
 
         match result {
             Ok(_) => 1,

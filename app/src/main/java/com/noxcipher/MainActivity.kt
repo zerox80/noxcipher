@@ -128,37 +128,38 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Convert to bytes
-        val charBuffer = java.nio.CharBuffer.wrap(passwordText)
-        val byteBuffer = java.nio.charset.StandardCharsets.UTF_8.encode(charBuffer)
-        val passwordBytes = ByteArray(byteBuffer.remaining())
-        byteBuffer.get(passwordBytes)
-        
-        // Clear UI immediately
-        passwordText.clear()
-
+        // Bug 2 Fix: Break loop after first successful connection attempt to avoid race condition
+        // Also Bug 3 Fix: Use manual byte conversion to avoid uncleared ByteBuffer
         for (device in deviceList.values) {
             log("Device: ${device.deviceName} (Vendor: ${device.vendorId}, Product: ${device.productId})")
-            // Pass a copy of password bytes to each attempt if needed, or just reuse since we are on main thread and it's sequential?
-            // connectDevice launches a coroutine. We should probably pass a copy if we want to be safe, 
-            // but MainViewModel copies/uses it. 
-            // Actually, MainViewModel.connectDevice takes ByteArray. 
-            // We should pass a copy because the ViewModel might clear it.
-            val passwordCopy = passwordBytes.clone()
             
             if (usbManager.hasPermission(device)) {
-                connectDevice(device, passwordCopy)
+                // Bug 1 Fix: Check if native lib is initialized
+                if (!RustNative.isInitialized) {
+                    Toast.makeText(this, "Native library not initialized", Toast.LENGTH_LONG).show()
+                    return
+                }
+
+                // Bug 3 Fix: Manual conversion to avoid uncleared ByteBuffer
+                val passwordBytes = ByteArray(passwordText.length)
+                for (i in passwordText.indices) {
+                    passwordBytes[i] = passwordText[i].code.toByte()
+                }
+
+                connectDevice(device, passwordBytes)
+                
+                // Clear UI immediately
+                passwordText.clear()
+                
+                // Break after first attempt to avoid cancelling our own job
+                break 
             } else {
-                // Request permission doesn't connect immediately. 
-                // We can't easily pass password to the broadcast receiver without storing it insecurely.
-                // For this fix, we'll just request permission and user has to click "List Devices" again.
-                // Or we just skip connecting here if no permission.
                 requestPermission(device)
+                // Don't break here, we might want to request permission for multiple devices? 
+                // Or just the first one? Let's stick to first one for simplicity and consistency.
+                break
             }
         }
-        
-        // Clear our local copy
-        passwordBytes.fill(0)
     }
 
     private fun requestPermission(device: UsbDevice) {
