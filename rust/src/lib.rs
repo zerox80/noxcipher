@@ -73,7 +73,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
 
 #[no_mangle]
 pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     offset: jlong,
@@ -90,7 +90,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
         };
 
         let mut buf = vec![0u8; len as usize];
-        if let Err(e) = env.get_byte_array_region(data, 0, &mut buf) {
+        // Cast u8 buffer to i8 for JNI
+        let buf_ptr = buf.as_mut_ptr() as *mut i8;
+        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len as usize) };
+
+        if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
              let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
              return;
         }
@@ -101,7 +105,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
         }
 
         // Write back
-        if let Err(e) = env.set_byte_array_region(data, 0, &buf) {
+        // Cast u8 buffer to i8 for JNI
+        let buf_ptr = buf.as_ptr() as *const i8;
+        let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, len as usize) };
+
+        if let Err(e) = env.set_byte_array_region(&data_obj, 0, buf_slice) {
              let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
         }
     }));
@@ -109,7 +117,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
 #[no_mangle]
 pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     offset: jlong,
@@ -126,7 +134,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
         };
 
         let mut buf = vec![0u8; len as usize];
-        if let Err(e) = env.get_byte_array_region(data, 0, &mut buf) {
+        // Cast u8 buffer to i8 for JNI
+        let buf_ptr = buf.as_mut_ptr() as *mut i8;
+        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len as usize) };
+        
+        if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
              let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
              return;
         }
@@ -137,9 +149,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
         }
 
         // Write back
-        if let Err(e) = env.set_byte_array_region(data, 0, &buf) {
+        // Cast u8 buffer to i8 for JNI
+        let buf_ptr = buf.as_ptr() as *const i8;
+        let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, len as usize) };
+
+        if let Err(e) = env.set_byte_array_region(&data_obj, 0, buf_slice) {
              let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
-        }
+         }
     }));
 }
 

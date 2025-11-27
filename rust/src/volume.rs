@@ -8,7 +8,7 @@ use serpent::Serpent;
 use twofish::Twofish;
 use std::sync::Mutex;
 use std::fmt;
-use cipher::{KeyInit, BlockDecrypt, BlockEncrypt};
+use cipher::KeyInit;
 
 // Type alias for the XTS cipher. We need a trait object or enum to handle different ciphers.
 // For simplicity in this "try-all" approach, we'll define an enum.

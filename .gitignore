@@ -10,3 +10,4 @@
 local.properties
 
 target/
+app/src/main/jniLibs/
