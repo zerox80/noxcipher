@@ -7,30 +7,39 @@ import android.widget.ListView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.github.mjdev.libaums.fs.UsbFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
 class FileBrowserActivity : AppCompatActivity() {
 
     private lateinit var lvFiles: ListView
     private var currentDialog: androidx.appcompat.app.AlertDialog? = null
-    private var currentPath = "/"
+    private var currentDir: UsbFile? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_file_browser)
         lvFiles = findViewById(R.id.lvFiles)
 
+        val fs = SessionManager.activeFileSystem
+        if (fs == null) {
+            Toast.makeText(this, "Session expired", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
+        
+        currentDir = fs.rootDirectory
         loadFiles()
     }
 
     override fun onBackPressed() {
-        if (currentPath != "/") {
+        if (currentDir != null && !currentDir!!.isRoot) {
             // Go up
-            val parent = java.io.File(currentPath).parent
-            currentPath = if (parent == null || parent == "/") "/" else "$parent/"
+            currentDir = currentDir!!.parent
             loadFiles()
         } else {
             super.onBackPressed()
@@ -40,86 +49,55 @@ class FileBrowserActivity : AppCompatActivity() {
     private fun loadFiles() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // List files from root
-                val files = try {
-                    if (!RustNative.isInitialized) throw Exception("Native library not initialized")
-                    RustNative.listFiles(currentPath)
-                } catch (e: Exception) {
-                    // Handle process death/restoration where Rust state is lost
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@FileBrowserActivity, "Session expired or error: ${e.message}", Toast.LENGTH_LONG).show()
-                        // Redirect to Login
-                        val intent = Intent(this@FileBrowserActivity, MainActivity::class.java)
-                        intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
-                        startActivity(intent)
-                        finish()
-                    }
-                    return@launch
-                }
+                val dir = currentDir ?: return@launch
+                val files = dir.listFiles()
+                
+                // Sort: Directories first, then files
+                val sortedFiles = files.sortedWith(compareBy({ !it.isDirectory }, { it.name }))
                 
                 withContext(Dispatchers.Main) {
-                    val adapter = ArrayAdapter(this@FileBrowserActivity, android.R.layout.simple_list_item_1, files)
+                    // Display names
+                    val fileNames = sortedFiles.map { if (it.isDirectory) "${it.name}/" else it.name }
+                    val adapter = ArrayAdapter(this@FileBrowserActivity, android.R.layout.simple_list_item_1, fileNames)
                     lvFiles.adapter = adapter
 
                     lvFiles.setOnItemClickListener { _, _, position, _ ->
-                        val fileName = files[position]
-                        if (fileName.endsWith("/")) {
-                            // Directory navigation
-                            // Bug 9 Fix: Use java.io.File for robust path construction
-                            val newFile = java.io.File(currentPath, fileName)
-                            currentPath = if (newFile.absolutePath.endsWith("/")) newFile.absolutePath else "${newFile.absolutePath}/"
-                            // Remove trailing slash for path construction if needed, but Rust might expect it or not.
-                            // Let's keep it simple: if we append "dir/", we get "/dir/".
-                            // Actually, we should probably clean it up.
-                            // If fileName is "dir/", new path is "/dir/".
-                            // If we are in "/dir/", and click "subdir/", new path is "/dir/subdir/".
-                            // But wait, Rust listFiles takes a path.
-                            // If I pass "/dir/", it should work.
+                        val selectedFile = sortedFiles[position]
+                        if (selectedFile.isDirectory) {
+                            currentDir = selectedFile
                             loadFiles()
                         } else {
-                            readFile(fileName)
+                            readFile(selectedFile)
                         }
                     }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@FileBrowserActivity, "Unexpected error: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@FileBrowserActivity, "Error listing files: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
     }
 
-    private fun readFile(fileName: String) {
+    private fun readFile(file: UsbFile) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Bug 4 Fix: Chunked reading to avoid OOM
-                val chunkSize = 8 * 1024 // 8KB chunks
                 val maxReadSize = 1024 * 1024 // 1MB limit for display
-                val buffer = ByteArray(chunkSize)
-                val contentBuilder = java.io.ByteArrayOutputStream()
+                val buffer = ByteBuffer.allocate(maxReadSize)
                 
-                var totalRead = 0
-                var offset = 0L
-                var isTruncated = false
-
-                while (totalRead < maxReadSize) {
-                    // Construct full path
-                    val fullPath = if (currentPath == "/") fileName else "$currentPath$fileName"
-                    val bytesRead = RustNative.readFile(fullPath, offset, buffer)
-                    if (bytesRead < 0) throw java.io.IOException("Read failed")
-                    if (bytesRead == 0) break // EOF
-
-                    contentBuilder.write(buffer, 0, bytesRead)
-                    totalRead += bytesRead
-                    offset += bytesRead
-                    
-                    if (totalRead >= maxReadSize) {
-                        isTruncated = true
-                        break
-                    }
-                }
+                // UsbFile.read takes offset and ByteBuffer
+                // We read up to maxReadSize
+                val lengthToRead = Math.min(file.length, maxReadSize.toLong()).toInt()
+                buffer.limit(lengthToRead)
                 
-                val content = contentBuilder.toByteArray()
+                file.read(0, buffer)
+                
+                val content = ByteArray(lengthToRead)
+                buffer.flip()
+                buffer.get(content)
+                
+                val isTruncated = file.length > maxReadSize
                 
                 // Bug 5 Fix: Better binary detection
                 val (text, truncated) = withContext(Dispatchers.Default) {
@@ -128,7 +106,7 @@ class FileBrowserActivity : AppCompatActivity() {
                         String(content, StandardCharsets.UTF_8)
                     } else {
                         val sb = StringBuilder()
-                        sb.append("[Binary Data: ${content.size} bytes]\n\nHex Dump (First 512 bytes):\n")
+                        sb.append("[Binary Data: ${file.length} bytes]\n\nHex Dump (First 512 bytes):\n")
                         FileUtils.toHex(content.take(512).toByteArray(), sb)
                         sb.toString()
                     }
@@ -136,7 +114,7 @@ class FileBrowserActivity : AppCompatActivity() {
                 }
                 
                 withContext(Dispatchers.Main) {
-                    showFileContent(fileName, text, truncated)
+                    showFileContent(file.name, text, truncated)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {

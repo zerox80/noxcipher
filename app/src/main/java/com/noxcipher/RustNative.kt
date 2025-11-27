@@ -24,9 +24,26 @@ object RustNative {
     }
 
     private external fun initLogger()
-    // Password as ByteArray for security
-    external fun unlockVolume(fd: Int, password: ByteArray): Boolean
-    external fun listFiles(path: String): Array<String>
-    // Read into buffer, return bytes read
-    external fun readFile(path: String, offset: Long, buffer: ByteArray): Int
+
+    /**
+     * Initializes the Veracrypt volume.
+     * @param password The password bytes.
+     * @param header The first 128KB of the volume (containing the header).
+     * @return A handle to the native context, or throws exception.
+     */
+    external fun init(password: ByteArray, header: ByteArray): Long
+
+    /**
+     * Decrypts a buffer in-place.
+     * @param handle The native context handle.
+     * @param offset The absolute byte offset of the data (used for XTS tweak).
+     * @param data The data to decrypt (in-place).
+     */
+    external fun decrypt(handle: Long, offset: Long, data: ByteArray)
+
+    /**
+     * Closes the native context.
+     * @param handle The native context handle.
+     */
+    external fun close(handle: Long)
 }
