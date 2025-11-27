@@ -177,7 +177,7 @@ class FileBrowserActivity : AppCompatActivity() {
 
     private fun toHex(bytes: ByteArray, sb: StringBuilder) {
         for (b in bytes) {
-            sb.append(String.format("%02x", b))
+            sb.append(String.format("%02x", b.toInt() and 0xFF))
         }
     }
 }

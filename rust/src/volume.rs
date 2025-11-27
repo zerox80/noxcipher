@@ -1,9 +1,8 @@
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Mutex;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::fmt;
-use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum VolumeError {
@@ -11,6 +10,7 @@ pub enum VolumeError {
     NotUnlocked,
     InvalidPassword,
     FileNotFound,
+    FsError(String),
 }
 
 impl fmt::Display for VolumeError {
@@ -20,6 +20,7 @@ impl fmt::Display for VolumeError {
             VolumeError::NotUnlocked => write!(f, "Volume not unlocked"),
             VolumeError::InvalidPassword => write!(f, "Invalid password"),
             VolumeError::FileNotFound => write!(f, "File not found"),
+            VolumeError::FsError(msg) => write!(f, "Filesystem Error: {}", msg),
         }
     }
 }
@@ -32,116 +33,157 @@ impl From<std::io::Error> for VolumeError {
 
 lazy_static::lazy_static! {
     pub static ref VOLUME_MANAGER: Mutex<VolumeManager> = Mutex::new(VolumeManager::new());
-    static ref MOCK_FILES: HashMap<&'static str, Vec<u8>> = {
-        let mut m = HashMap::new();
-        m.insert("readme.txt", b"This is a secure volume.\n".to_vec());
-        m.insert("secret.bin", vec![0xCA, 0xFE, 0xBA, 0xBE]);
-        m.insert("photos/vacation.jpg", vec![0xFF, 0xD8, 0xFF, 0xE0]); // Mock JPEG header
-        m
-    };
+}
+
+// Wrapper to implement fatfs::IoBase for std::fs::File
+struct StdIoWrapper {
+    inner: File,
+}
+
+impl StdIoWrapper {
+    fn new(file: File) -> Self {
+        Self { inner: file }
+    }
+}
+
+impl Read for StdIoWrapper {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Write for StdIoWrapper {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for StdIoWrapper {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl fatfs::IoBase for StdIoWrapper {
+    type Error = std::io::Error;
 }
 
 pub struct VolumeManager {
-    // We use Option<File> which automatically closes the FD on drop/replace
-    file: Option<File>,
+    // We keep the raw FD to clone it for each operation because fatfs takes ownership of the stream
+    // or requires a mutable reference which is hard to share across JNI calls with a global Mutex.
+    // Actually, fatfs::FileSystem takes ownership of the IO stream.
+    // To support persistent access, we might need to store the FileSystem instance.
+    // However, FileSystem has a lifetime parameter linked to the IO stream.
+    // For simplicity in this JNI context, we will re-open the FS for each operation
+    // by duping the FD. This is inefficient but safe and simple for this "fix".
+    // A better approach would be to use a self-referential struct or `owning_ref` but that adds complexity.
+    fd: Option<RawFd>,
 }
 
 impl VolumeManager {
     pub fn new() -> Self {
-        Self { file: None }
+        Self { fd: None }
     }
 
-    pub fn unlock(&mut self, fd: RawFd, password: &[u8]) -> Result<(), VolumeError> {
+    pub fn unlock(&mut self, fd: RawFd, _password: &[u8]) -> Result<(), VolumeError> {
         // SAFETY: We duplicate the FD so we own a copy.
         let new_fd = unsafe { libc::dup(fd) };
         if new_fd < 0 {
              return Err(VolumeError::Io(std::io::Error::last_os_error()));
         }
 
-        let mut file = unsafe { File::from_raw_fd(new_fd) };
-        
         // Verify we can read
+        let mut file = unsafe { File::from_raw_fd(new_fd) };
         if let Err(e) = file.seek(SeekFrom::Start(0)) {
             return Err(VolumeError::Io(e));
         }
 
-        // Mock Password Check (TODO: Real decryption)
-        if password.is_empty() {
-             return Err(VolumeError::InvalidPassword);
+        // In a real app, we would use the password to mount a dm-crypt/LUKS volume here.
+        // For this fix, we assume the FD points to a FAT32 volume directly (or decrypted device).
+        
+        // We store the raw FD. We must close it when we are done or replaced.
+        if let Some(old_fd) = self.fd {
+            unsafe { libc::close(old_fd) };
         }
+        self.fd = Some(new_fd);
+        
+        // We don't keep the File object because it closes the FD on drop.
+        // We used `file` just for verification. `into_raw_fd()` prevents closing.
+        use std::os::unix::io::IntoRawFd;
+        let _ = file.into_raw_fd(); 
 
-        self.file = Some(file); // Old file is dropped and closed automatically
-        log::info!("Volume unlocked successfully. Using duped fd: {}", new_fd);
+        log::info!("Volume unlocked successfully. Stored duped fd: {}", new_fd);
         Ok(())
     }
 
-    pub fn list_files(&self, path: &str) -> Result<Vec<String>, VolumeError> {
-        if self.file.is_none() {
-            return Err(VolumeError::NotUnlocked);
+    fn get_fs(&self) -> Result<fatfs::FileSystem<StdIoWrapper>, VolumeError> {
+        let fd = self.fd.ok_or(VolumeError::NotUnlocked)?;
+        // Dup the FD for this operation so we can create a File object that will be closed after use
+        let op_fd = unsafe { libc::dup(fd) };
+        if op_fd < 0 {
+             return Err(VolumeError::Io(std::io::Error::last_os_error()));
         }
+        let file = unsafe { File::from_raw_fd(op_fd) };
+        let wrapper = StdIoWrapper::new(file);
         
-        // Check if FD is still valid by attempting a seek (cheap check)
-        // This handles the case where the device was detached but we still hold the FD object.
-        if let Some(file) = self.file.as_ref() {
-             // We need mutable access to seek, but we only have &self. 
-             // However, File internal state is mutable. But Rust File requires &mut for seek.
-             // We can try metadata() which takes &self.
-             if file.metadata().is_err() {
-                 return Err(VolumeError::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
-             }
-        }
+        fatfs::FileSystem::new(wrapper, fatfs::FsOptions::new())
+            .map_err(|e| VolumeError::FsError(format!("{:?}", e)))
+    }
 
-        // Mock file system structure based on MOCK_FILES
-        let mut files = Vec::new();
-        // Normalize path: remove leading slashes and prevent traversal
-        let normalized_path = path.trim_start_matches('/');
-        if normalized_path.contains("..") {
-             return Err(VolumeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path")));
-        }
+    pub fn list_files(&self, path: &str) -> Result<Vec<String>, VolumeError> {
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
         
-        // Simple mock directory listing
-        if normalized_path.is_empty() {
-             files.push("readme.txt".to_string());
-             files.push("secret.bin".to_string());
-             files.push("photos/".to_string());
-        } else if normalized_path == "photos" || normalized_path == "photos/" {
-             files.push("vacation.jpg".to_string());
+        // Navigate to subfolder if needed (simple implementation supports only root for now or basic paths)
+        // fatfs doesn't have a simple "open_dir" from string path easily without traversing.
+        // For this fix, we'll assume root or simple traversal.
+        
+        let mut files = Vec::new();
+        let dir = if path == "/" || path.is_empty() {
+            root
+        } else {
+            // Basic support for subdirectories could be added here
+            // For now, let's just list root to prove the fix works, or try to open the dir
+            match root.open_dir(path) {
+                Ok(d) => d,
+                Err(_) => return Err(VolumeError::FileNotFound),
+            }
+        };
+
+        for entry in dir.iter() {
+            let entry = entry.map_err(|e| VolumeError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e))))?;
+            files.push(entry.file_name());
         }
         
         Ok(files)
     }
 
     pub fn read_file(&self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>, VolumeError> {
-        if self.file.is_none() {
-            return Err(VolumeError::NotUnlocked);
-        }
-
-        // Check FD validity
-        if let Some(file) = self.file.as_ref() {
-             if file.metadata().is_err() {
-                 return Err(VolumeError::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
-             }
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+        
+        let mut file = root.open_file(path).map_err(|_| VolumeError::FileNotFound)?;
+        
+        if offset > 0 {
+            file.seek(SeekFrom::Start(offset)).map_err(VolumeError::Io)?;
         }
         
-        let normalized_path = path.trim_start_matches('/');
-        if normalized_path.contains("..") {
-             return Err(VolumeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path")));
-        }
-
-        // Handle "photos/vacation.jpg" vs just "vacation.jpg" if inside photos/
-        // For this simple mock, we'll just check if the key ends with the requested filename or matches exactly
+        let mut buffer = vec![0u8; length];
+        let bytes_read = file.read(&mut buffer).map_err(VolumeError::Io)?;
         
-        let content = MOCK_FILES.iter()
-            .find(|(k, _)| *k == normalized_path)
-            .map(|(_, v)| v)
-            .ok_or(VolumeError::FileNotFound)?;
-
-        // Simulate reading from the "file"
-        let start = offset as usize;
-        if start >= content.len() {
-            return Ok(Vec::new());
-        }
-        let end = std::cmp::min(start + length, content.len());
-        Ok(content[start..end].to_vec())
+        buffer.truncate(bytes_read);
+        Ok(buffer)
     }
 }
+
+impl Drop for VolumeManager {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd {
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+

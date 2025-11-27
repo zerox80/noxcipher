@@ -120,14 +120,45 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Get password once
+        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
+        val passwordText = etPassword.text
+        if (passwordText.isNullOrEmpty()) {
+            Toast.makeText(this, "Password cannot be empty", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Convert to bytes
+        val charBuffer = java.nio.CharBuffer.wrap(passwordText)
+        val byteBuffer = java.nio.charset.StandardCharsets.UTF_8.encode(charBuffer)
+        val passwordBytes = ByteArray(byteBuffer.remaining())
+        byteBuffer.get(passwordBytes)
+        
+        // Clear UI immediately
+        passwordText.clear()
+
         for (device in deviceList.values) {
             log("Device: ${device.deviceName} (Vendor: ${device.vendorId}, Product: ${device.productId})")
+            // Pass a copy of password bytes to each attempt if needed, or just reuse since we are on main thread and it's sequential?
+            // connectDevice launches a coroutine. We should probably pass a copy if we want to be safe, 
+            // but MainViewModel copies/uses it. 
+            // Actually, MainViewModel.connectDevice takes ByteArray. 
+            // We should pass a copy because the ViewModel might clear it.
+            val passwordCopy = passwordBytes.clone()
+            
             if (usbManager.hasPermission(device)) {
-                connectDevice(device)
+                connectDevice(device, passwordCopy)
             } else {
+                // Request permission doesn't connect immediately. 
+                // We can't easily pass password to the broadcast receiver without storing it insecurely.
+                // For this fix, we'll just request permission and user has to click "List Devices" again.
+                // Or we just skip connecting here if no permission.
                 requestPermission(device)
             }
         }
+        
+        // Clear our local copy
+        passwordBytes.fill(0)
     }
 
     private fun requestPermission(device: UsbDevice) {
@@ -135,38 +166,9 @@ class MainActivity : AppCompatActivity() {
         usbManager.requestPermission(device, permissionIntent)
     }
 
-    private fun connectDevice(device: UsbDevice) {
+    private fun connectDevice(device: UsbDevice, passwordBytes: ByteArray) {
         log("Connecting to ${device.deviceName}...")
-        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
-        val passwordText = etPassword.text
-        if (passwordText.isNullOrEmpty()) {
-            Toast.makeText(this, "Password cannot be empty", Toast.LENGTH_SHORT).show()
-            return
-        }
-        
-        // Convert CharSequence to ByteArray without creating an intermediate String if possible
-        // However, standard Charset encoders often work on CharBuffer or String.
-        // We'll do a best effort: copy chars to byte array and clear the Editable.
-        val charBuffer = java.nio.CharBuffer.wrap(passwordText)
-        val byteBuffer = java.nio.charset.StandardCharsets.UTF_8.encode(charBuffer)
-        val passwordBytes = ByteArray(byteBuffer.remaining())
-        byteBuffer.get(passwordBytes)
-        
-        // Clear the sensitive data from UI immediately
-        passwordText.clear()
         viewModel.connectDevice(usbManager, device, passwordBytes)
-        // Clear local reference, though String remains until GC. 
-        // Ideally we'd use CharSequence or Editable to avoid String creation if possible, 
-        // but EditText.text.toString() creates it anyway.
-        // We can at least clear the ByteArray we created.
-        // Note: ViewModel clears it too, but this is a separate copy if we passed a copy. 
-        // In Kotlin, toByteArray() creates a new array. ViewModel receives that array.
-        // So we don't need to clear it here if we pass it directly.
-        // Wait, we passed `passwordBytes`. ViewModel clears it.
-        // But `passwordStr` is still in memory. 
-        // To be truly secure, we should avoid `toString()` and use `Chars` but Android EditText makes it hard.
-        // For now, the fix is ensuring the ByteArray passed to JNI is cleared, which ViewModel does.
-        // We just added validation here.
     }
 
     private fun log(message: String) {
@@ -180,6 +182,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(usbReceiver)
+        try {
+            unregisterReceiver(usbReceiver)
+        } catch (e: IllegalArgumentException) {
+            // Receiver not registered, ignore
+        }
     }
 }
