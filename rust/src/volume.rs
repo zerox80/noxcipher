@@ -11,6 +11,7 @@ pub enum VolumeError {
     InvalidPassword,
     FileNotFound,
     FsError(String),
+    InvalidPath, // Bug 8 Fix: Added specific error for invalid paths
 }
 
 impl fmt::Display for VolumeError {
@@ -21,6 +22,7 @@ impl fmt::Display for VolumeError {
             VolumeError::InvalidPassword => write!(f, "Invalid password"),
             VolumeError::FileNotFound => write!(f, "File not found"),
             VolumeError::FsError(msg) => write!(f, "Filesystem Error: {}", msg),
+            VolumeError::InvalidPath => write!(f, "Invalid path containing traversal"),
         }
     }
 }
@@ -134,6 +136,11 @@ impl VolumeManager {
     }
 
     pub fn list_files(&self, path: &str) -> Result<Vec<String>, VolumeError> {
+        // Bug 2 Fix: Prevent path traversal
+        if path.contains("..") {
+            return Err(VolumeError::InvalidPath);
+        }
+
         let fs = self.get_fs()?;
         let root = fs.root_dir();
         
@@ -155,13 +162,24 @@ impl VolumeManager {
 
         for entry in dir.iter() {
             let entry = entry.map_err(|e| VolumeError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e))))?;
-            files.push(entry.file_name());
+            // Bug 10 Fix: Append slash to directories to indicate type
+            let name = if entry.is_dir() {
+                format!("{}/", entry.file_name())
+            } else {
+                entry.file_name()
+            };
+            files.push(name);
         }
         
         Ok(files)
     }
 
     pub fn read_file(&self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>, VolumeError> {
+        // Bug 2 Fix: Prevent path traversal
+        if path.contains("..") {
+            return Err(VolumeError::InvalidPath);
+        }
+
         let fs = self.get_fs()?;
         let root = fs.root_dir();
         

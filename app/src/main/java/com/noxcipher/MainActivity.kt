@@ -41,9 +41,9 @@ class MainActivity : AppCompatActivity() {
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     }
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        device?.apply {
-                            connectDevice(this)
-                        }
+                        // Bug 1 Fix: Do not auto-connect as we don't have the password here securely.
+                        // The previous code `connectDevice(this)` was also missing the password argument, causing a crash/compilation error.
+                        Toast.makeText(context, "Permission granted. Please click 'List Devices' again.", Toast.LENGTH_LONG).show()
                     } else {
                         log("Permission denied for device $device")
                     }

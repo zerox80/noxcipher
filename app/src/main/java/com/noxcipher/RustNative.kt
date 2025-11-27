@@ -3,6 +3,9 @@ package com.noxcipher
 import android.util.Log
 
 object RustNative {
+    var isInitialized = false
+        private set
+
     init {
         try {
             Log.d("RustNative", "Attempting to load library: rust_noxcipher")
@@ -10,6 +13,7 @@ object RustNative {
             Log.d("RustNative", "Library loaded successfully. Initializing logger...")
             initLogger()
             Log.d("RustNative", "Logger initialized.")
+            isInitialized = true
         } catch (e: UnsatisfiedLinkError) {
             Log.e("RustNative", "CRITICAL: Failed to load rust_noxcipher library. Ensure the .so file is present for this architecture.", e)
         } catch (e: Exception) {

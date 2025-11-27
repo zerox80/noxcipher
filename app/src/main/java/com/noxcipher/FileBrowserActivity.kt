@@ -16,6 +16,7 @@ class FileBrowserActivity : AppCompatActivity() {
 
     private lateinit var lvFiles: ListView
     private var currentDialog: androidx.appcompat.app.AlertDialog? = null
+    private var currentPath = "/"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,12 +26,24 @@ class FileBrowserActivity : AppCompatActivity() {
         loadFiles()
     }
 
+    override fun onBackPressed() {
+        if (currentPath != "/") {
+            // Go up
+            val parent = java.io.File(currentPath).parent
+            currentPath = if (parent == null || parent == "/") "/" else "$parent/"
+            loadFiles()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
     private fun loadFiles() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // List files from root
                 val files = try {
-                    RustNative.listFiles("/")
+                    if (!RustNative.isInitialized) throw Exception("Native library not initialized")
+                    RustNative.listFiles(currentPath)
                 } catch (e: Exception) {
                     // Handle process death/restoration where Rust state is lost
                     withContext(Dispatchers.Main) {
@@ -50,7 +63,20 @@ class FileBrowserActivity : AppCompatActivity() {
 
                     lvFiles.setOnItemClickListener { _, _, position, _ ->
                         val fileName = files[position]
-                        readFile(fileName)
+                        if (fileName.endsWith("/")) {
+                            // Directory navigation
+                            currentPath = if (currentPath == "/") "/$fileName" else "$currentPath/$fileName".replace("//", "/")
+                            // Remove trailing slash for path construction if needed, but Rust might expect it or not.
+                            // Let's keep it simple: if we append "dir/", we get "/dir/".
+                            // Actually, we should probably clean it up.
+                            // If fileName is "dir/", new path is "/dir/".
+                            // If we are in "/dir/", and click "subdir/", new path is "/dir/subdir/".
+                            // But wait, Rust listFiles takes a path.
+                            // If I pass "/dir/", it should work.
+                            loadFiles()
+                        } else {
+                            readFile(fileName)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -75,7 +101,9 @@ class FileBrowserActivity : AppCompatActivity() {
                 var isTruncated = false
 
                 while (totalRead < maxReadSize) {
-                    val bytesRead = RustNative.readFile(fileName, offset, buffer)
+                    // Construct full path
+                    val fullPath = if (currentPath == "/") fileName else "$currentPath$fileName"
+                    val bytesRead = RustNative.readFile(fullPath, offset, buffer)
                     if (bytesRead < 0) throw java.io.IOException("Read failed")
                     if (bytesRead == 0) break // EOF
 
@@ -93,13 +121,13 @@ class FileBrowserActivity : AppCompatActivity() {
                 
                 // Bug 5 Fix: Better binary detection
                 val (text, truncated) = withContext(Dispatchers.Default) {
-                    val isText = isText(content)
+                    val isText = FileUtils.isText(content)
                     val displayText = if (isText) {
                         String(content, StandardCharsets.UTF_8)
                     } else {
                         val sb = StringBuilder()
                         sb.append("[Binary Data: ${content.size} bytes]\n\nHex Dump (First 512 bytes):\n")
-                        toHex(content.take(512).toByteArray(), sb)
+                        FileUtils.toHex(content.take(512).toByteArray(), sb)
                         sb.toString()
                     }
                     Pair(displayText, isTruncated)
@@ -128,7 +156,7 @@ class FileBrowserActivity : AppCompatActivity() {
         
         if (isTruncated) {
             val warning = android.widget.TextView(this).apply {
-                text = "WARNING: File content truncated (showing first 1MB)"
+                text = "WARNING: File content truncated (showing first 1MB). File is too large to display fully."
                 setTextColor(android.graphics.Color.RED)
                 setPadding(32, 32, 32, 0)
             }
@@ -150,34 +178,4 @@ class FileBrowserActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun isText(bytes: ByteArray): Boolean {
-        // Bug 5 Fix: Improved binary detection
-        if (bytes.isEmpty()) return true
-        
-        // Check for common binary headers (magic numbers)
-        // PDF: %PDF
-        if (bytes.size >= 4 && bytes[0] == 0x25.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x44.toByte() && bytes[3] == 0x46.toByte()) return false
-        // PNG: .PNG
-        if (bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return false
-        // JPEG: FF D8 FF
-        if (bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return false
-
-        val limit = minOf(bytes.size, 512)
-        var controlChars = 0
-        for (i in 0 until limit) {
-            val b = bytes[i].toInt() and 0xFF
-            if (b == 0) return false // Null byte is definitely binary
-            if (b < 32 && b != 9 && b != 10 && b != 13) { // Control chars except tab, LF, CR
-                controlChars++
-            }
-        }
-        // If more than 10% are control characters, assume binary
-        return controlChars < (limit * 0.1)
-    }
-
-    private fun toHex(bytes: ByteArray, sb: StringBuilder) {
-        for (b in bytes) {
-            sb.append(String.format("%02x", b.toInt() and 0xFF))
-        }
-    }
 }

@@ -202,6 +202,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
 
         if !content.is_empty() {
             // Convert &[u8] to &[i8] (jbyte)
+            // Bug 3 Fix: Added safety comment explaining why this unsafe block is valid.
+            // SAFETY: Casting &[u8] to &[i8] is safe because they have the same layout and size.
+            // The slice is only used for reading and does not outlive 'content'.
             let content_i8 = unsafe { std::slice::from_raw_parts(content.as_ptr() as *const i8, content.len()) };
             if let Err(e) = env.set_byte_array_region(buffer, 0, content_i8) {
                  let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to copy to buffer: {}", e));
