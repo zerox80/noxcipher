@@ -93,7 +93,11 @@ impl VolumeManager {
 
         // Mock file system structure based on MOCK_FILES
         let mut files = Vec::new();
+        // Normalize path: remove leading slashes and prevent traversal
         let normalized_path = path.trim_start_matches('/');
+        if normalized_path.contains("..") {
+             return Err(VolumeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path")));
+        }
         
         // Simple mock directory listing
         if normalized_path.is_empty() {
@@ -120,11 +124,15 @@ impl VolumeManager {
         }
         
         let normalized_path = path.trim_start_matches('/');
+        if normalized_path.contains("..") {
+             return Err(VolumeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path")));
+        }
+
         // Handle "photos/vacation.jpg" vs just "vacation.jpg" if inside photos/
         // For this simple mock, we'll just check if the key ends with the requested filename or matches exactly
         
         let content = MOCK_FILES.iter()
-            .find(|(k, _)| *k == normalized_path || k.ends_with(normalized_path))
+            .find(|(k, _)| *k == normalized_path)
             .map(|(_, v)| v)
             .ok_or(VolumeError::FileNotFound)?;
 

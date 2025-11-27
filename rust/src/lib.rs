@@ -40,7 +40,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_unlockVolume(
         log::info!("Attempting to unlock volume with fd: {}", fd);
         
         // Handle Mutex poisoning by recovering the lock
-        let mut manager = VOLUME_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
+        let mut manager = match VOLUME_MANAGER.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         let result = manager.unlock(fd, &password_bytes);
         
         // Zero out the password bytes in memory (best effort)
@@ -84,7 +90,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
             }
         };
 
-        let manager = VOLUME_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
+        let manager = match VOLUME_MANAGER.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         let files = match manager.list_files(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -151,6 +163,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     buffer: jbyteArray,
 ) -> jint {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if offset < 0 {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Offset cannot be negative");
+             return -1;
+        }
+
         let path: String = match env.get_string(&path) {
             Ok(s) => s.into(),
             Err(e) => {
@@ -167,7 +184,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
             }
         };
 
-        let manager = VOLUME_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
+        let manager = match VOLUME_MANAGER.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         
         let content = match manager.read_file(&path, offset as u64, buffer_len as usize) {
             Ok(c) => c,

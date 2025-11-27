@@ -34,7 +34,12 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 ACTION_USB_PERMISSION -> {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    }
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         device?.apply {
                             connectDevice(this)
@@ -44,7 +49,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    }
                     log("Device detached: ${device?.deviceName}")
                     // Ideally we should close connection here, but ViewModel handles it on cleared or we can trigger it.
                     // For now just log.
@@ -69,7 +79,11 @@ class MainActivity : AppCompatActivity() {
 
             val filter = IntentFilter(ACTION_USB_PERMISSION)
             filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            registerReceiver(usbReceiver, filter)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(usbReceiver, filter)
+            }
             log("Receiver registered")
 
             // Observe ViewModel results
@@ -123,12 +137,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectDevice(device: UsbDevice) {
         log("Connecting to ${device.deviceName}...")
-        val passwordStr = findViewById<android.widget.EditText>(R.id.etPassword).text.toString()
-        if (passwordStr.isEmpty()) {
+        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
+        val passwordText = etPassword.text
+        if (passwordText.isNullOrEmpty()) {
             Toast.makeText(this, "Password cannot be empty", Toast.LENGTH_SHORT).show()
             return
         }
-        val passwordBytes = passwordStr.toByteArray(Charsets.UTF_8)
+        
+        // Convert CharSequence to ByteArray without creating an intermediate String if possible
+        // However, standard Charset encoders often work on CharBuffer or String.
+        // We'll do a best effort: copy chars to byte array and clear the Editable.
+        val charBuffer = java.nio.CharBuffer.wrap(passwordText)
+        val byteBuffer = java.nio.charset.StandardCharsets.UTF_8.encode(charBuffer)
+        val passwordBytes = ByteArray(byteBuffer.remaining())
+        byteBuffer.get(passwordBytes)
+        
+        // Clear the sensitive data from UI immediately
+        passwordText.clear()
         viewModel.connectDevice(usbManager, device, passwordBytes)
         // Clear local reference, though String remains until GC. 
         // Ideally we'd use CharSequence or Editable to avoid String creation if possible, 
