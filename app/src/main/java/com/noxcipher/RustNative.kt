@@ -29,9 +29,10 @@ object RustNative {
      * Initializes the Veracrypt volume.
      * @param password The password bytes.
      * @param header The first 128KB of the volume (containing the header).
+     * @param pim The PIM value (0 for default).
      * @return A handle to the native context, or throws exception.
      */
-    external fun init(password: ByteArray, header: ByteArray): Long
+    external fun init(password: ByteArray, header: ByteArray, pim: Int): Long
 
     /**
      * Decrypts a buffer in-place.
@@ -40,6 +41,14 @@ object RustNative {
      * @param data The data to decrypt (in-place).
      */
     external fun decrypt(handle: Long, offset: Long, data: ByteArray)
+
+    /**
+     * Encrypts a buffer in-place.
+     * @param handle The native context handle.
+     * @param offset The absolute byte offset of the data (used for XTS tweak).
+     * @param data The data to encrypt (in-place).
+     */
+    external fun encrypt(handle: Long, offset: Long, data: ByteArray)
 
     /**
      * Closes the native context.

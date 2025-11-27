@@ -13,6 +13,14 @@
         android:hint="Enter Password"
         android:inputType="textPassword" />
 
+    <EditText
+        android:id="@+id/etPim"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="PIM (Default: 0)"
+        android:inputType="number"
+        android:text="0" />
+
     <Button
         android:id="@+id/btnListDevices"
         android:layout_width="match_parent"

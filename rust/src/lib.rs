@@ -31,6 +31,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     _class: JClass,
     password: jbyteArray,
     header: jbyteArray,
+    pim: jni::sys::jint,
 ) -> jlong {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let password_bytes = match env.convert_byte_array(password) {
@@ -49,7 +50,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             }
         };
 
-        match volume::create_context(&password_bytes, &header_bytes) {
+        match volume::create_context(&password_bytes, &header_bytes, pim as i32) {
             Ok(handle) => handle,
             Err(e) => {
                 log::error!("Init failed: {}", e);
@@ -97,6 +98,36 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         if let Err(e) = volume::decrypt(handle, offset as u64, data_slice) {
              let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
+        }
+        
+        // data_array is dropped here, triggering CopyBack
+    }));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    offset: jlong,
+    data: jbyteArray,
+) {
+    let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let data_array = match env.get_byte_array_elements(data, jni::objects::ReleaseMode::CopyBack) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get data array: {}", e));
+                return;
+            }
+        };
+
+        // Convert to mutable slice
+        let len = data_array.len();
+        let ptr = data_array.as_ptr() as *mut u8;
+        let data_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+
+        if let Err(e) = volume::encrypt(handle, offset as u64, data_slice) {
+             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
         }
         
         // data_array is dropped here, triggering CopyBack

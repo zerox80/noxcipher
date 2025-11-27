@@ -128,6 +128,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Get PIM
+        val etPim = findViewById<android.widget.EditText>(R.id.etPim)
+        val pimText = etPim.text.toString()
+        val pim = if (pimText.isEmpty()) 0 else pimText.toIntOrNull() ?: 0
+
         // Bug 2 Fix: Break loop after first successful connection attempt to avoid race condition
         // Also Bug 3 Fix: Use manual byte conversion to avoid uncleared ByteBuffer
         for (device in deviceList.values) {
@@ -146,7 +151,7 @@ class MainActivity : AppCompatActivity() {
                     passwordBytes[i] = passwordText[i].code.toByte()
                 }
 
-                connectDevice(device, passwordBytes)
+                connectDevice(device, passwordBytes, pim)
                 
                 // Clear UI immediately
                 passwordText.clear()
@@ -167,9 +172,10 @@ class MainActivity : AppCompatActivity() {
         usbManager.requestPermission(device, permissionIntent)
     }
 
-    private fun connectDevice(device: UsbDevice, passwordBytes: ByteArray) {
+    private fun connectDevice(device: UsbDevice, passwordBytes: ByteArray, pim: Int) {
         log("Connecting to ${device.deviceName}...")
-        viewModel.connectDevice(usbManager, device, passwordBytes)
+        // ViewModel handles device selection internally using libaums
+        viewModel.connectDevice(usbManager, passwordBytes, pim)
     }
 
     private fun log(message: String) {

@@ -43,7 +43,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectDevice(
         usbManager: UsbManager, // Kept for compatibility if needed, but libaums handles it
-        password: ByteArray
+        password: ByteArray,
+        pim: Int
     ) {
         connectionJob?.cancel()
         
@@ -89,9 +90,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // 2. Initialize Rust Crypto
                     val headerBytes = headerBuffer.array()
                     val handle = try {
-                         RustNative.init(password, headerBytes)
+                         // Use provided PIM
+                         RustNative.init(password, headerBytes, pim)
                     } catch (e: Exception) {
-                        _connectionResult.emit(ConnectionResult.Error("Wrong password or invalid volume: ${e.message}"))
+                        _connectionResult.emit(ConnectionResult.Error("Wrong password, PIM, or invalid volume: ${e.message}"))
                         return@withLock
                     }
                     rustHandle = handle

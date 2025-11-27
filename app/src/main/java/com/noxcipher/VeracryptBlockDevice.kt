@@ -62,6 +62,37 @@ class VeracryptBlockDevice(
 
     @Throws(IOException::class)
     override fun write(offset: Long, src: ByteBuffer) {
-        throw IOException("Writing is not supported in this version")
+        // 1. Encrypt data before writing
+        val position = src.position()
+        
+        if (src.hasArray()) {
+            val array = src.array()
+            val arrayOffset = src.arrayOffset() + position
+            val length = src.remaining() // Bytes to write
+            
+            // We need to encrypt the data. Since we shouldn't modify the source buffer in-place 
+            // (it might be used elsewhere), we should copy it, encrypt, and then write.
+            // However, for performance, if we own the buffer or can modify it, it's faster.
+            // But standard contract usually implies src is read-only or we shouldn't mutate content unless specified.
+            // Let's copy to a temporary buffer to be safe and correct.
+            
+            val buffer = ByteArray(length)
+            System.arraycopy(array, arrayOffset, buffer, 0, length)
+            
+            // Encrypt in-place in our temp buffer
+            RustNative.encrypt(rustHandle, offset, buffer)
+            
+            // Write encrypted data to physical device
+            // We need to wrap our encrypted byte array in a ByteBuffer
+            val encryptedBuf = ByteBuffer.wrap(buffer)
+            physicalDevice.write(offset, encryptedBuf)
+            
+            // Update position of source buffer to indicate we consumed it
+            src.position(position + length)
+            
+        } else {
+            // TODO: Handle direct buffers
+            throw IOException("Direct buffers not supported yet")
+        }
     }
 }
