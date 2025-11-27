@@ -1,1 +1,0 @@
-C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\target\i686-linux-android\release\librust_noxcipher.so: C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\src\lib.rs C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\src\volume.rs

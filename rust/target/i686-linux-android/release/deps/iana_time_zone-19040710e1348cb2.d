@@ -1,9 +1,0 @@
-C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\target\i686-linux-android\release\deps\iana_time_zone-19040710e1348cb2.d: C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\lib.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\ffi_utils.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\tz_android.rs
-
-C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\target\i686-linux-android\release\deps\libiana_time_zone-19040710e1348cb2.rlib: C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\lib.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\ffi_utils.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\tz_android.rs
-
-C:\Users\Rujbin.Nassereslam\Documents\veracrypt-android\rust\target\i686-linux-android\release\deps\libiana_time_zone-19040710e1348cb2.rmeta: C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\lib.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\ffi_utils.rs C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\tz_android.rs
-
-C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\lib.rs:
-C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\ffi_utils.rs:
-C:\Users\Rujbin.Nassereslam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\iana-time-zone-0.1.64\src\tz_android.rs:
