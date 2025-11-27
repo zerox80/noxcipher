@@ -1,0 +1,19 @@
+[package]
+name = "rust_noxcipher"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+android_logger = "0.13"
+log = "0.4"
+fatfs = "0.3"
+exfat = "0.1"
+fscommon = "0.1"
+lazy_static = "1.4"
+# veracrypt = "0.1" # Using placeholder for now, might need specific git repo or implementation
+# For now, we will simulate unlocking to ensure the architecture works
+# In a real scenario, we would use a crate like `veracrypt` or `rust-ccc`
