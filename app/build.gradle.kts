@@ -55,7 +55,7 @@ android {
 cargo {
     module = "../rust"
     libname = "rust_noxcipher"
-    targets = listOf("arm", "arm64", "x86", "x86_64")
+    targets = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
     profile = "release"
 }
 

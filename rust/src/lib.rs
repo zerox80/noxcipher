@@ -1,5 +1,5 @@
 use jni::JNIEnv;
-use jni::objects::JClass;
+use jni::objects::{JClass, JByteArray};
 use jni::sys::{jbyteArray, jlong};
 use android_logger::Config;
 use log::LevelFilter;
@@ -34,7 +34,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     pim: jni::sys::jint,
 ) -> jlong {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let password_bytes = match env.convert_byte_array(password) {
+        let password_obj = unsafe { JByteArray::from_raw(password) };
+        let password_bytes = match env.convert_byte_array(&password_obj) {
             Ok(b) => b,
             Err(e) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid password array: {}", e));
@@ -42,7 +43,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             }
         };
 
-        let header_bytes = match env.convert_byte_array(header) {
+        let header_obj = unsafe { JByteArray::from_raw(header) };
+        let header_bytes = match env.convert_byte_array(&header_obj) {
             Ok(b) => b,
             Err(e) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid header array: {}", e));
@@ -71,66 +73,73 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
 
 #[no_mangle]
 pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     offset: jlong,
     data: jbyteArray,
 ) {
     let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // We need to modify the data in place.
-        // Get primitives with Critical or standard? Standard is fine for now.
-        // But we need to write back.
-        // `get_byte_array_elements` gives us a pointer.
-        
-        let data_array = match env.get_byte_array_elements(data, jni::objects::ReleaseMode::CopyBack) {
-            Ok(a) => a,
+        let data_obj = unsafe { JByteArray::from_raw(data) };
+        let len = match env.get_array_length(&data_obj) {
+            Ok(l) => l,
             Err(e) => {
-                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get data array: {}", e));
+                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get array length: {}", e));
                 return;
             }
         };
 
-        // Convert to mutable slice
-        let len = data_array.len();
-        let ptr = data_array.as_ptr() as *mut u8;
-        let data_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-
-        if let Err(e) = volume::decrypt(handle, offset as u64, data_slice) {
-             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
+        let mut buf = vec![0u8; len as usize];
+        if let Err(e) = env.get_byte_array_region(data, 0, &mut buf) {
+             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
+             return;
         }
-        
-        // data_array is dropped here, triggering CopyBack
+
+        if let Err(e) = volume::decrypt(handle, offset as u64, &mut buf) {
+             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
+             return;
+        }
+
+        // Write back
+        if let Err(e) = env.set_byte_array_region(data, 0, &buf) {
+             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
+        }
     }));
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     offset: jlong,
     data: jbyteArray,
 ) {
     let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let data_array = match env.get_byte_array_elements(data, jni::objects::ReleaseMode::CopyBack) {
-            Ok(a) => a,
+        let data_obj = unsafe { JByteArray::from_raw(data) };
+        let len = match env.get_array_length(&data_obj) {
+            Ok(l) => l,
             Err(e) => {
-                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get data array: {}", e));
+                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get array length: {}", e));
                 return;
             }
         };
 
-        // Convert to mutable slice
-        let len = data_array.len();
-        let ptr = data_array.as_ptr() as *mut u8;
-        let data_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-
-        if let Err(e) = volume::encrypt(handle, offset as u64, data_slice) {
-             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
+        let mut buf = vec![0u8; len as usize];
+        if let Err(e) = env.get_byte_array_region(data, 0, &mut buf) {
+             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
+             return;
         }
-        
-        // data_array is dropped here, triggering CopyBack
+
+        if let Err(e) = volume::encrypt(handle, offset as u64, &mut buf) {
+             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
+             return;
+        }
+
+        // Write back
+        if let Err(e) = env.set_byte_array_region(data, 0, &buf) {
+             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
+        }
     }));
 }
 

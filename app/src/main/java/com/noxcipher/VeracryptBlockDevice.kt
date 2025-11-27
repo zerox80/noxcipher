@@ -7,7 +7,7 @@ import java.nio.ByteBuffer
 class VeracryptBlockDevice(
     private val physicalDevice: BlockDeviceDriver,
     private val rustHandle: Long
-) : BlockDeviceDriver {
+) : BlockDeviceDriver, java.io.Closeable {
 
     override fun init() {
         // Physical device should already be initialized
@@ -96,5 +96,9 @@ class VeracryptBlockDevice(
         // Write encrypted data to physical device
         val encryptedBuf = ByteBuffer.wrap(buffer)
         physicalDevice.write(offset, encryptedBuf)
+    }
+
+    override fun close() {
+        RustNative.close(rustHandle)
     }
 }

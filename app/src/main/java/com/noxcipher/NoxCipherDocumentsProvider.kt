@@ -109,6 +109,11 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         
         val storageManager = context!!.getSystemService(android.content.Context.STORAGE_SERVICE) as android.os.storage.StorageManager
         
+        // Create a background thread for file I/O to avoid ANR
+        val handlerThread = android.os.HandlerThread("FileIOThread_${System.currentTimeMillis()}")
+        handlerThread.start()
+        val handler = android.os.Handler(handlerThread.looper)
+
         // We need to implement a ProxyFileDescriptorCallback
         val callback = object : android.os.ProxyFileDescriptorCallback() {
             private var currentOffset = 0L
@@ -149,6 +154,8 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
                     file.flush()
                 } catch (e: IOException) {
                     // Ignore
+                } finally {
+                    handlerThread.quitSafely()
                 }
             }
         }
@@ -156,7 +163,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         return storageManager.openProxyFileDescriptor(
             ParcelFileDescriptor.parseMode(mode),
             callback,
-            android.os.Handler(android.os.Looper.getMainLooper())
+            handler
         )
     }
 
@@ -213,7 +220,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags)
         row.add(DocumentsContract.Document.COLUMN_SIZE, file.length)
-        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0) // Not available easily
+        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, file.lastModified())
     }
     
     private fun getDocIdForFile(file: UsbFile): String {
