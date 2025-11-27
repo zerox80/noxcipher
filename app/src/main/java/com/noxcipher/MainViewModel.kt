@@ -10,6 +10,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,55 +29,63 @@ class MainViewModel : ViewModel() {
     val connectionResult = _connectionResult.asSharedFlow()
 
     private var connectionJob: Job? = null
-    private val isConnecting = AtomicBoolean(false)
+    private val connectionMutex = Mutex()
 
     fun connectDevice(
         usbManager: UsbManager,
         device: UsbDevice,
-        password: String
+        password: ByteArray // Changed to ByteArray
     ) {
-        if (isConnecting.getAndSet(true)) {
-            return // Already connecting
-        }
-
         // Cancel any existing connection attempt
         connectionJob?.cancel()
         
         connectionJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                // Close previous connection if it's different or we are reconnecting
-                activeConnection?.close()
-                activeConnection = null
+            // Use Mutex to ensure only one connection attempt runs at a time
+            // and to protect activeConnection state changes
+            connectionMutex.withLock {
+                try {
+                    // Close previous connection if it's different or we are reconnecting
+                    activeConnection?.close()
+                    activeConnection = null
 
-                val connection = usbManager.openDevice(device)
-                if (connection == null) {
-                    _connectionResult.emit(ConnectionResult.Error("Failed to open device connection"))
-                    isConnecting.set(false)
-                    return@launch
-                }
+                    val connection = usbManager.openDevice(device)
+                    if (connection == null) {
+                        _connectionResult.emit(ConnectionResult.Error("Failed to open device connection"))
+                        password.fill(0) // Clear password
+                        return@withLock
+                    }
 
-                activeConnection = connection
-                val fd = connection.fileDescriptor
+                    activeConnection = connection
+                    val fd = connection.fileDescriptor
 
-                // Call Rust
-                val success = try {
-                    RustNative.unlockVolume(fd, password)
+                    // Call Rust
+                    // Use NonCancellable to ensure we don't interrupt the native call in a bad state
+                    // or at least ensure we handle the result.
+                    val success = withContext(kotlinx.coroutines.NonCancellable) {
+                        try {
+                            RustNative.unlockVolume(fd, password)
+                        } catch (e: Exception) {
+                            // Log error but don't emit yet, handle below
+                            false
+                        } finally {
+                            password.fill(0) // Always clear password
+                        }
+                    }
+
+                    if (success) {
+                        _connectionResult.emit(ConnectionResult.Success)
+                    } else {
+                        _connectionResult.emit(ConnectionResult.Error("Unlock failed"))
+                        // Close connection on failure
+                        activeConnection?.close()
+                        activeConnection = null
+                    }
+
                 } catch (e: Exception) {
-                    _connectionResult.emit(ConnectionResult.Error("Unlock Error: ${e.message}"))
-                    isConnecting.set(false)
-                    return@launch
+                    _connectionResult.emit(ConnectionResult.Error("Error: ${e.message}"))
+                    activeConnection?.close()
+                    activeConnection = null
                 }
-
-                if (success) {
-                    _connectionResult.emit(ConnectionResult.Success)
-                } else {
-                    _connectionResult.emit(ConnectionResult.Error("Unlock failed (unknown reason)"))
-                }
-
-            } catch (e: Exception) {
-                _connectionResult.emit(ConnectionResult.Error("Error: ${e.message}"))
-            } finally {
-                isConnecting.set(false)
             }
         }
     }

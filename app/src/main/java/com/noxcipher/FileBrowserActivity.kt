@@ -1,5 +1,6 @@
 package com.noxcipher
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.ListView
@@ -14,15 +15,10 @@ import java.nio.charset.StandardCharsets
 class FileBrowserActivity : AppCompatActivity() {
 
     private lateinit var lvFiles: ListView
+    private var currentDialog: androidx.appcompat.app.AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Bug 8: Check if volume is unlocked (simple check via try/catch on listFiles or shared state)
-        // Since we don't have a shared state singleton for "isUnlocked" easily accessible without ViewModel,
-        // we can try a quick operation or just rely on loadFiles failing gracefully.
-        // Better: Check if we can list files immediately.
-        
         setContentView(R.layout.activity_file_browser)
         lvFiles = findViewById(R.id.lvFiles)
 
@@ -36,9 +32,14 @@ class FileBrowserActivity : AppCompatActivity() {
                 val files = try {
                     RustNative.listFiles("/")
                 } catch (e: Exception) {
+                    // Handle process death/restoration where Rust state is lost
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(this@FileBrowserActivity, "Not connected or error: ${e.message}", Toast.LENGTH_LONG).show()
-                        finish() // Close activity if we can't list files
+                        Toast.makeText(this@FileBrowserActivity, "Session expired or error: ${e.message}", Toast.LENGTH_LONG).show()
+                        // Redirect to Login
+                        val intent = Intent(this@FileBrowserActivity, MainActivity::class.java)
+                        intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
+                        startActivity(intent)
+                        finish()
                     }
                     return@launch
                 }
@@ -63,25 +64,49 @@ class FileBrowserActivity : AppCompatActivity() {
     private fun readFile(fileName: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Bug 5: Read limit warning
-                val readLimit = 4096
-                val content = RustNative.readFile(fileName, 0, readLimit)
+                // Bug 4 Fix: Chunked reading to avoid OOM
+                val chunkSize = 8 * 1024 // 8KB chunks
+                val maxReadSize = 1024 * 1024 // 1MB limit for display
+                val buffer = ByteArray(chunkSize)
+                val contentBuilder = java.io.ByteArrayOutputStream()
                 
-                // Bug 4: UI Freeze - Process text on IO/Default dispatcher
-                val (text, isTruncated) = withContext(Dispatchers.Default) {
+                var totalRead = 0
+                var offset = 0L
+                var isTruncated = false
+
+                while (totalRead < maxReadSize) {
+                    val bytesRead = RustNative.readFile(fileName, offset, buffer)
+                    if (bytesRead < 0) throw java.io.IOException("Read failed")
+                    if (bytesRead == 0) break // EOF
+
+                    contentBuilder.write(buffer, 0, bytesRead)
+                    totalRead += bytesRead
+                    offset += bytesRead
+                    
+                    if (totalRead >= maxReadSize) {
+                        isTruncated = true
+                        break
+                    }
+                }
+                
+                val content = contentBuilder.toByteArray()
+                
+                // Bug 5 Fix: Better binary detection
+                val (text, truncated) = withContext(Dispatchers.Default) {
                     val isText = isText(content)
                     val displayText = if (isText) {
                         String(content, StandardCharsets.UTF_8)
                     } else {
-                        "[Binary Data: ${content.size} bytes]\n\nHex Dump (First 512 bytes):\n${toHex(content.take(512).toByteArray())}"
+                        val sb = StringBuilder()
+                        sb.append("[Binary Data: ${content.size} bytes]\n\nHex Dump (First 512 bytes):\n")
+                        toHex(content.take(512).toByteArray(), sb)
+                        sb.toString()
                     }
-                    // Check if we likely hit the limit (this is a heuristic, ideally we'd check file size)
-                    val truncated = content.size == readLimit
-                    Pair(displayText, truncated)
+                    Pair(displayText, isTruncated)
                 }
                 
                 withContext(Dispatchers.Main) {
-                    showFileContent(fileName, text, isTruncated)
+                    showFileContent(fileName, text, truncated)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -92,6 +117,10 @@ class FileBrowserActivity : AppCompatActivity() {
     }
 
     private fun showFileContent(fileName: String, content: String, isTruncated: Boolean) {
+        if (currentDialog?.isShowing == true) {
+            currentDialog?.dismiss()
+        }
+
         val scrollView = android.widget.ScrollView(this)
         val container = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -99,7 +128,7 @@ class FileBrowserActivity : AppCompatActivity() {
         
         if (isTruncated) {
             val warning = android.widget.TextView(this).apply {
-                text = "WARNING: File content truncated (showing first 4KB)"
+                text = "WARNING: File content truncated (showing first 1MB)"
                 setTextColor(android.graphics.Color.RED)
                 setPadding(32, 32, 32, 0)
             }
@@ -114,7 +143,7 @@ class FileBrowserActivity : AppCompatActivity() {
         container.addView(textView)
         scrollView.addView(container)
 
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        currentDialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(fileName)
             .setView(scrollView)
             .setPositiveButton("Close", null)
@@ -122,8 +151,17 @@ class FileBrowserActivity : AppCompatActivity() {
     }
 
     private fun isText(bytes: ByteArray): Boolean {
-        // Bug 6: Better binary detection
-        // Check first 512 bytes for nulls or excessive control characters
+        // Bug 5 Fix: Improved binary detection
+        if (bytes.isEmpty()) return true
+        
+        // Check for common binary headers (magic numbers)
+        // PDF: %PDF
+        if (bytes.size >= 4 && bytes[0] == 0x25.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x44.toByte() && bytes[3] == 0x46.toByte()) return false
+        // PNG: .PNG
+        if (bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return false
+        // JPEG: FF D8 FF
+        if (bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return false
+
         val limit = minOf(bytes.size, 512)
         var controlChars = 0
         for (i in 0 until limit) {
@@ -137,7 +175,9 @@ class FileBrowserActivity : AppCompatActivity() {
         return controlChars < (limit * 0.1)
     }
 
-    private fun toHex(bytes: ByteArray): String {
-        return bytes.joinToString("") { "%02x".format(it) }
+    private fun toHex(bytes: ByteArray, sb: StringBuilder) {
+        for (b in bytes) {
+            sb.append(String.format("%02x", b))
+        }
     }
 }

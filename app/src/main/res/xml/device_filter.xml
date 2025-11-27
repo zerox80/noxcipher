@@ -1,5 +1,6 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Filter for Mass Storage devices (Class 08) -->
     <usb-device class-id="8" />
+    <!-- Some devices might appear as Class 00 (Per Interface) -->
+    <usb-device class-id="0" />
 </resources>
