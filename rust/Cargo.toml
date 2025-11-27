@@ -24,10 +24,5 @@ serpent = "0.4"
 twofish = "0.7"
 whirlpool = "0.10"
 ripemd = "0.1"
-serpent = "0.4"
-twofish = "0.7"
-whirlpool = "0.10"
-ripemd = "0.1"
-# veracrypt = "0.1" # Using placeholder for now, might need specific git repo or implementation
-# For now, we will simulate unlocking to ensure the architecture works
-# In a real scenario, we would use a crate like `veracrypt` or `rust-ccc`
+
+

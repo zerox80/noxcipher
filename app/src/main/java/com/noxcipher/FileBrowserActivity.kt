@@ -27,7 +27,7 @@ class FileBrowserActivity : AppCompatActivity() {
 
         val fs = SessionManager.activeFileSystem
         if (fs == null) {
-            Toast.makeText(this, "Session expired", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_session_expired), Toast.LENGTH_LONG).show()
             finish()
             return
         }
@@ -73,7 +73,7 @@ class FileBrowserActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@FileBrowserActivity, "Error listing files: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@FileBrowserActivity, getString(R.string.toast_error_listing, e.message), Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -106,7 +106,7 @@ class FileBrowserActivity : AppCompatActivity() {
                         String(content, StandardCharsets.UTF_8)
                     } else {
                         val sb = StringBuilder()
-                        sb.append("[Binary Data: ${file.length} bytes]\n\nHex Dump (First 512 bytes):\n")
+                        sb.append(getString(R.string.binary_display_template, file.length))
                         FileUtils.toHex(content.take(512).toByteArray(), sb)
                         sb.toString()
                     }
@@ -118,7 +118,7 @@ class FileBrowserActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@FileBrowserActivity, "Error reading file: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@FileBrowserActivity, getString(R.string.toast_error_reading, e.message), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -136,7 +136,7 @@ class FileBrowserActivity : AppCompatActivity() {
         
         if (isTruncated) {
             val warning = android.widget.TextView(this).apply {
-                text = "WARNING: File content truncated (showing first 1MB). File is too large to display fully."
+                text = getString(R.string.warning_truncated)
                 setTextColor(android.graphics.Color.RED)
                 setPadding(32, 32, 32, 0)
             }
@@ -154,7 +154,7 @@ class FileBrowserActivity : AppCompatActivity() {
         currentDialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(fileName)
             .setView(scrollView)
-            .setPositiveButton("Close", null)
+            .setPositiveButton(R.string.dialog_close, null)
             .show()
     }
 

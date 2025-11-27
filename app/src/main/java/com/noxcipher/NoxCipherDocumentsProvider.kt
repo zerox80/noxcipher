@@ -47,7 +47,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             row.add(DocumentsContract.Root.COLUMN_ROOT_ID, DEFAULT_ROOT_ID)
             row.add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
             row.add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
-            row.add(DocumentsContract.Root.COLUMN_TITLE, "NoxCipher Volume")
+            row.add(DocumentsContract.Root.COLUMN_TITLE, context!!.getString(R.string.root_title))
             row.add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "/")
             // row.add(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES, fs.capacity - fs.occupiedSpace) // Optional
         }
@@ -62,19 +62,19 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     ): Cursor {
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
         
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException("Volume not mounted")
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
         
         try {
             val parentFile = getFileForDocId(fs, parentDocumentId)
             if (!parentFile.isDirectory) {
-                throw FileNotFoundException("Document is not a directory: $parentDocumentId")
+                throw FileNotFoundException(context!!.getString(R.string.error_doc_not_dir, parentDocumentId))
             }
             
             for (file in parentFile.listFiles()) {
                 includeFile(result, file)
             }
         } catch (e: IOException) {
-            throw FileNotFoundException("Failed to list files: ${e.message}")
+            throw FileNotFoundException(context!!.getString(R.string.error_list_files, e.message))
         }
         
         return result
@@ -82,13 +82,13 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException("Volume not mounted")
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
         
         try {
             val file = getFileForDocId(fs, documentId)
             includeFile(result, file)
         } catch (e: IOException) {
-            throw FileNotFoundException("File not found: $documentId")
+            throw FileNotFoundException(context!!.getString(R.string.error_file_not_found, documentId))
         }
         
         return result
@@ -99,7 +99,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         mode: String,
         signal: CancellationSignal?
     ): ParcelFileDescriptor {
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException("Volume not mounted")
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
         val file = getFileForDocId(fs, documentId)
         
         // We need to return a ParcelFileDescriptor.
@@ -118,16 +118,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             }
 
             override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
-                // libaums read: read(offset, buffer)
-                // We need to handle the offset.
-                // If offset != currentOffset, we might need to seek?
-                // UsbFile.read takes an offset.
-                
                 val buffer = java.nio.ByteBuffer.wrap(data)
-                // UsbFile.read writes into buffer.
-                // It returns bytes read? No, it throws IOException or returns nothing?
-                // Checking libaums source/docs (mental model):
-                // int read(long offset, ByteBuffer destination)
                 
                 // Ensure we don't read past EOF
                 if (offset >= file.length) return 0
@@ -143,8 +134,22 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
                 }
             }
 
+            override fun onWrite(offset: Long, size: Int, data: ByteArray): Int {
+                val buffer = java.nio.ByteBuffer.wrap(data, 0, size)
+                try {
+                    file.write(offset, buffer)
+                    return size
+                } catch (e: IOException) {
+                    throw android.system.ErrnoException("write", android.system.OsConstants.EIO)
+                }
+            }
+
             override fun onRelease() {
-                // Nothing to close on file itself, handled by FS
+                try {
+                    file.flush()
+                } catch (e: IOException) {
+                    // Ignore
+                }
             }
         }
         
@@ -165,7 +170,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         
         for (part in parts) {
             val children = current.listFiles()
-            current = children.find { it.name == part } ?: throw FileNotFoundException("File not found: $part in $docId")
+            current = children.find { it.name == part } ?: throw FileNotFoundException(context!!.getString(R.string.error_file_not_found_in, part, docId))
         }
         
         return current
@@ -199,9 +204,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
         
         // Flags
-        var flags = 0
-        // if (file.isDirectory) flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
-        // We are read-only for now
+        var flags = DocumentsContract.Document.FLAG_SUPPORTS_WRITE or
+                    DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+        
+        if (file.isDirectory) {
+            flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+        }
         
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags)
         row.add(DocumentsContract.Document.COLUMN_SIZE, file.length)
@@ -213,5 +221,32 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         val parent = file.parent
         val parentId = if (parent.isRoot) "" else getDocIdForFile(parent)
         return "$parentId/${file.name}"
+    }
+
+    override fun deleteDocument(documentId: String) {
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
+        try {
+            val file = getFileForDocId(fs, documentId)
+            file.delete()
+        } catch (e: IOException) {
+            throw FileNotFoundException(context!!.getString(R.string.error_delete, e.message))
+        }
+    }
+
+    override fun createDocument(parentDocumentId: String, mimeType: String, displayName: String): String {
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
+        try {
+            val parentFile = getFileForDocId(fs, parentDocumentId)
+            if (!parentFile.isDirectory) throw FileNotFoundException(context!!.getString(R.string.error_parent_not_dir))
+            
+            val newFile = if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                parentFile.createDirectory(displayName)
+            } else {
+                parentFile.createFile(displayName)
+            }
+            return getDocIdForFile(newFile)
+        } catch (e: IOException) {
+            throw FileNotFoundException(context!!.getString(R.string.error_create, e.message))
+        }
     }
 }

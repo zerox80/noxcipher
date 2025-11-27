@@ -24,39 +24,49 @@ class VeracryptBlockDevice(
         physicalDevice.read(offset, dest)
         
         // 2. Decrypt in-place
-        // We need to access the backing array of the ByteBuffer
-        if (dest.hasArray()) {
-            val array = dest.array()
-            val arrayOffset = dest.arrayOffset() + position
-            val length = dest.position() - position // Bytes read
-            
-            // Create a slice or pass offset/length to Rust?
-            // Rust expects a ByteArray. We can pass the whole array but we need to tell Rust where to start?
-            // My Rust signature is `decrypt(handle, offset, data)`.
-            // JNI `jbyteArray` refers to the whole array.
-            // If I pass `dest.array()`, it passes the whole backing array.
-            // I should probably copy the relevant bytes to a temporary buffer if I can't slice it easily for JNI,
-            // OR I can use `ByteBuffer` in JNI (GetDirectBufferAddress) if it's direct.
-            // But `libaums` usually uses heap buffers.
-            
-            // For simplicity and safety with JNI:
-            // Copy the read bytes to a new ByteArray, decrypt, copy back.
-            // OR: pass the array and an offset/length to Rust?
-            // My Rust `decrypt` takes `jbyteArray`. It decrypts the WHOLE array.
-            // So I MUST pass a slice.
-            
-            val bytesRead = dest.position() - position
-            if (bytesRead > 0) {
+        val bytesRead = dest.position() - position
+        if (bytesRead > 0) {
+            if (dest.hasArray()) {
+                // Heap buffer: use backing array directly if possible (but we need to pass to JNI)
+                // JNI takes jbyteArray.
+                val array = dest.array()
+                val arrayOffset = dest.arrayOffset() + position
+                
+                // We must copy to a clean ByteArray for JNI because we can't easily pass a slice/offset to our current Rust impl
+                // Our Rust impl takes the WHOLE array and decrypts it.
+                // So we MUST copy the relevant chunk.
                 val buffer = ByteArray(bytesRead)
                 System.arraycopy(array, arrayOffset, buffer, 0, bytesRead)
                 
                 RustNative.decrypt(rustHandle, offset, buffer)
                 
                 System.arraycopy(buffer, 0, array, arrayOffset, bytesRead)
+            } else {
+                // Direct buffer: must copy out
+                val buffer = ByteArray(bytesRead)
+                // Read from buffer (this advances position, so we need to reset or use absolute get?)
+                // Actually, physicalDevice.read ADVANCED the position.
+                // So we need to read from the *previous* position.
+                
+                // Save current position
+                val currentPos = dest.position()
+                
+                // Go back to where we started reading
+                dest.position(position)
+                dest.get(buffer) // Reads bytesRead bytes
+                
+                // Decrypt
+                RustNative.decrypt(rustHandle, offset, buffer)
+                
+                // Write back
+                dest.position(position)
+                dest.put(buffer)
+                
+                // Restore position (though put() should have advanced it to currentPos)
+                if (dest.position() != currentPos) {
+                    dest.position(currentPos)
+                }
             }
-        } else {
-            // TODO: Handle direct buffers if necessary
-            throw IOException("Direct buffers not supported yet")
         }
     }
 
@@ -64,35 +74,27 @@ class VeracryptBlockDevice(
     override fun write(offset: Long, src: ByteBuffer) {
         // 1. Encrypt data before writing
         val position = src.position()
+        val length = src.remaining()
+        
+        if (length <= 0) return
+
+        val buffer = ByteArray(length)
         
         if (src.hasArray()) {
             val array = src.array()
             val arrayOffset = src.arrayOffset() + position
-            val length = src.remaining() // Bytes to write
-            
-            // We need to encrypt the data. Since we shouldn't modify the source buffer in-place 
-            // (it might be used elsewhere), we should copy it, encrypt, and then write.
-            // However, for performance, if we own the buffer or can modify it, it's faster.
-            // But standard contract usually implies src is read-only or we shouldn't mutate content unless specified.
-            // Let's copy to a temporary buffer to be safe and correct.
-            
-            val buffer = ByteArray(length)
             System.arraycopy(array, arrayOffset, buffer, 0, length)
-            
-            // Encrypt in-place in our temp buffer
-            RustNative.encrypt(rustHandle, offset, buffer)
-            
-            // Write encrypted data to physical device
-            // We need to wrap our encrypted byte array in a ByteBuffer
-            val encryptedBuf = ByteBuffer.wrap(buffer)
-            physicalDevice.write(offset, encryptedBuf)
-            
-            // Update position of source buffer to indicate we consumed it
             src.position(position + length)
-            
         } else {
-            // TODO: Handle direct buffers
-            throw IOException("Direct buffers not supported yet")
+            // Direct buffer: get() advances position, which is what we want (consume the source)
+            src.get(buffer)
         }
+        
+        // Encrypt in-place in our temp buffer
+        RustNative.encrypt(rustHandle, offset, buffer)
+        
+        // Write encrypted data to physical device
+        val encryptedBuf = ByteBuffer.wrap(buffer)
+        physicalDevice.write(offset, encryptedBuf)
     }
 }

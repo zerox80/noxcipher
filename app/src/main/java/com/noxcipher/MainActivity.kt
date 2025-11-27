@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity() {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         // Bug 1 Fix: Do not auto-connect as we don't have the password here securely.
                         // The previous code `connectDevice(this)` was also missing the password argument, causing a crash/compilation error.
-                        Toast.makeText(context, "Permission granted. Please click 'List Devices' again.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_LONG).show()
                     } else {
                         log("Permission denied for device $device")
                     }
@@ -107,7 +107,7 @@ class MainActivity : AppCompatActivity() {
 
         } catch (e: Exception) {
             Log.e("MainActivity", "Error in onCreate", e)
-            Toast.makeText(this, "Error initializing app: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_error_init, e.message), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -116,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         log("Found ${deviceList.size} devices")
         
         if (deviceList.isEmpty()) {
-            Toast.makeText(this, "No USB devices found", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_no_devices), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
         val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
         val passwordText = etPassword.text
         if (passwordText.isNullOrEmpty()) {
-            Toast.makeText(this, "Password cannot be empty", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_password_empty), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -141,7 +141,7 @@ class MainActivity : AppCompatActivity() {
             if (usbManager.hasPermission(device)) {
                 // Bug 1 Fix: Check if native lib is initialized
                 if (!RustNative.isInitialized) {
-                    Toast.makeText(this, "Native library not initialized", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, getString(R.string.toast_native_not_init), Toast.LENGTH_LONG).show()
                     return
                 }
 

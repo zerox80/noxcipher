@@ -10,14 +10,14 @@
         android:id="@+id/etPassword"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Enter Password"
+        android:hint="@string/hint_password"
         android:inputType="textPassword" />
 
     <EditText
         android:id="@+id/etPim"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="PIM (Default: 0)"
+        android:hint="@string/hint_pim"
         android:inputType="number"
         android:text="0" />
 
@@ -25,14 +25,14 @@
         android:id="@+id/btnListDevices"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="List USB Devices" />
+        android:text="@string/btn_list_devices" />
 
     <TextView
         android:id="@+id/tvLog"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:text="Logs will appear here..."
+        android:text="@string/tv_log_default"
         android:scrollbars="vertical" />
 
 </LinearLayout>

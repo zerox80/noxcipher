@@ -55,7 +55,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     val devices = UsbMassStorageDevice.getMassStorageDevices(context)
                     if (devices.isEmpty()) {
-                        _connectionResult.emit(ConnectionResult.Error("No USB Mass Storage devices found"))
+                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_mass_storage)))
                         return@withLock
                     }
 
@@ -69,7 +69,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // libaums partitions are BlockDeviceDrivers.
                     val partitions = device.partitions
                     if (partitions.isEmpty()) {
-                        _connectionResult.emit(ConnectionResult.Error("No partitions found"))
+                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_partitions)))
                         return@withLock
                     }
                     
@@ -93,7 +93,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                          // Use provided PIM
                          RustNative.init(password, headerBytes, pim)
                     } catch (e: Exception) {
-                        _connectionResult.emit(ConnectionResult.Error("Wrong password, PIM, or invalid volume: ${e.message}"))
+                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_wrong_credentials, e.message)))
                         return@withLock
                     }
                     rustHandle = handle
@@ -105,7 +105,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // libaums FileSystemFactory detects FS type from the driver
                     val fs = FileSystemFactory.createFileSystem(null, veracryptDriver)
                     if (fs == null) {
-                         _connectionResult.emit(ConnectionResult.Error("Could not detect filesystem on decrypted volume"))
+                         _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_fs_detection)))
                          return@withLock
                     }
                     
@@ -115,7 +115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    _connectionResult.emit(ConnectionResult.Error("Error: ${e.message}"))
+                    _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_generic, e.message)))
                     closeConnection()
                 } finally {
                     password.fill(0)

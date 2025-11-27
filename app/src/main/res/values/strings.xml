@@ -1,3 +1,41 @@
 <resources>
     <string name="app_name">NoxCipher</string>
+
+    <!-- MainActivity UI -->
+    <string name="hint_password">Enter Password</string>
+    <string name="hint_pim">PIM (Default: 0)</string>
+    <string name="btn_list_devices">List USB Devices</string>
+    <string name="tv_log_default">Logs will appear here...</string>
+    <string name="toast_permission_granted">Permission granted. Please click \'List Devices\' again.</string>
+    <string name="toast_no_devices">No USB devices found</string>
+    <string name="toast_password_empty">Password cannot be empty</string>
+    <string name="toast_native_not_init">Native library not initialized</string>
+    <string name="toast_error_init">Error initializing app: %1$s</string>
+
+    <!-- FileBrowserActivity UI -->
+    <string name="title_files">Files</string>
+    <string name="toast_session_expired">Session expired</string>
+    <string name="toast_error_listing">Error listing files: %1$s</string>
+    <string name="toast_error_reading">Error reading file: %1$s</string>
+    <string name="dialog_close">Close</string>
+    <string name="warning_truncated">WARNING: File content truncated (showing first 1MB). File is too large to display fully.</string>
+    <string name="binary_display_template">[Binary Data: %1$d bytes]\n\nHex Dump (First 512 bytes):\n</string>
+
+    <!-- MainViewModel Messages -->
+    <string name="error_no_mass_storage">No USB Mass Storage devices found</string>
+    <string name="error_no_partitions">No partitions found</string>
+    <string name="error_wrong_credentials">Wrong password, PIM, or invalid volume: %1$s</string>
+    <string name="error_fs_detection">Could not detect filesystem on decrypted volume</string>
+    <string name="error_generic">Error: %1$s</string>
+
+    <!-- NoxCipherDocumentsProvider -->
+    <string name="root_title">NoxCipher Volume</string>
+    <string name="error_volume_not_mounted">Volume not mounted</string>
+    <string name="error_doc_not_dir">Document is not a directory: %1$s</string>
+    <string name="error_list_files">Failed to list files: %1$s</string>
+    <string name="error_file_not_found">File not found: %1$s</string>
+    <string name="error_file_not_found_in">File not found: %1$s in %2$s</string>
+    <string name="error_delete">Failed to delete: %1$s</string>
+    <string name="error_parent_not_dir">Parent not directory</string>
+    <string name="error_create">Failed to create: %1$s</string>
 </resources>
