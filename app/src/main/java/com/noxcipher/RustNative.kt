@@ -35,9 +35,19 @@ object RustNative {
      * @param password The password bytes.
      * @param header The first 128KB of the volume (containing the header).
      * @param pim The PIM value (0 for default).
+     * @param partitionOffset The offset of the partition start.
+     * @param protectionPassword The protection password bytes (optional).
+     * @param protectionPim The protection PIM value (0 for default).
      * @return A handle to the native context, or throws exception.
      */
-    external fun init(password: ByteArray, header: ByteArray, pim: Int, partitionOffset: Long): Long
+    external fun init(
+        password: ByteArray, 
+        header: ByteArray, 
+        pim: Int, 
+        partitionOffset: Long, 
+        protectionPassword: ByteArray?, 
+        protectionPim: Int
+    ): Long
 
     /**
      * Decrypts a buffer in-place.

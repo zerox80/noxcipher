@@ -154,14 +154,44 @@ lazy_static::lazy_static! {
     static ref NEXT_HANDLE: Mutex<i64> = Mutex::new(1);
 }
 
-pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32, partition_start_offset: u64) -> Result<i64, VolumeError> {
+pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32, partition_start_offset: u64, protection_password: Option<&[u8]>, protection_pim: i32) -> Result<i64, VolumeError> {
     // Try Standard Header at offset 0
-    if let Ok(handle) = try_header_at_offset(password, header_bytes, pim, 0, partition_start_offset) {
-        return Ok(handle);
+    if let Ok(mut vol) = try_header_at_offset(password, header_bytes, pim, 0, partition_start_offset) {
+        // If protection is requested, try to mount hidden volume
+        if let Some(prot_pass) = protection_password {
+             if header_bytes.len() >= 65536 + 512 {
+                 match try_header_at_offset(prot_pass, header_bytes, protection_pim, 65536, partition_start_offset) {
+                     Ok(hidden_vol) => {
+                         log::info!("Hidden Volume Protection Enabled");
+                         // Calculate protected range
+                         // Hidden volume is at the end of the outer volume?
+                         // No, hidden volume is within the outer volume.
+                         // We need to protect the area occupied by the hidden volume.
+                         // The hidden volume header is at 65536.
+                         // The hidden volume data starts at `hidden_vol.header.encrypted_area_start`?
+                         // Actually, for hidden volume, `encrypted_area_start` is the offset relative to the start of the *host* volume (outer volume).
+                         // So we protect from `encrypted_area_start` to `encrypted_area_start + encrypted_area_length`.
+                         
+                         let start = hidden_vol.header.encrypted_area_start;
+                         let end = start + hidden_vol.header.encrypted_area_length;
+                         vol.set_protection(start, end);
+                     },
+                     Err(_) => {
+                         // If protection password provided but failed to mount hidden volume, fail the whole operation?
+                         // VeraCrypt behavior: "Incorrect protection password" or similar.
+                         return Err(VolumeError::CryptoError("Failed to mount hidden volume for protection".to_string()));
+                     }
+                 }
+             } else {
+                 return Err(VolumeError::CryptoError("Buffer too small for hidden volume check".to_string()));
+             }
+        }
+        return register_context(vol);
     }
     
     // Try Hidden Volume Header at offset 65536 (64KB)
-    if header_bytes.len() >= 65536 + 512 {
+    // Only if NOT protecting (if protecting, we expect outer volume at 0)
+    if protection_password.is_none() && header_bytes.len() >= 65536 + 512 {
         if let Ok(handle) = try_header_at_offset(password, header_bytes, pim, 65536, partition_start_offset) {
             log::info!("Mounted Hidden Volume");
             return Ok(handle);
@@ -172,6 +202,17 @@ pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32, partition_
 }
 
 fn try_header_at_offset(password: &[u8], full_buffer: &[u8], pim: i32, offset: usize, partition_start_offset: u64) -> Result<i64, VolumeError> {
+    // This function returns a Handle (i64) but we need it to return a Volume struct for the protection logic.
+    // Refactoring to return Result<Volume, VolumeError>
+    // But wait, `create_context` calls `register_context` which consumes Volume.
+    // So I should split `try_header_at_offset` to return `Volume`.
+    // The original code returned `i64` because it called `register_context` inside.
+    // I will change it to return `Volume`.
+    unimplemented!("Should use try_header_at_offset_internal")
+}
+
+// Renamed helper to return Volume
+fn try_header_at_offset(password: &[u8], full_buffer: &[u8], pim: i32, offset: usize, partition_start_offset: u64) -> Result<Volume, VolumeError> {
     if full_buffer.len() < offset + 512 {
         return Err(VolumeError::InvalidHeader(HeaderError::InvalidMagic));
     }
@@ -185,22 +226,18 @@ fn try_header_at_offset(password: &[u8], full_buffer: &[u8], pim: i32, offset: u
     
     if pim > 0 {
         iterations_list.push(15000 + (pim as u32 * 1000));
+        // System Encryption / Boot (SHA-256, Blake2s, Streebog)
+        iterations_list.push(pim as u32 * 2048);
     } else {
         // Default VeraCrypt
         iterations_list.push(500_000); 
-        // System Encryption (SHA-256)
+        // System Encryption (SHA-256, Blake2s, Streebog)
         iterations_list.push(200_000);
-        // System Encryption (RIPEMD-160) - handled below
         // Legacy TrueCrypt
         iterations_list.push(1000); 
         iterations_list.push(2000);
     }
     
-    // For Blake2s, default is 500,000 in VC, but maybe different for legacy? Blake2s wasn't in TC.
-    // We'll use the same list for all for simplicity, as trying extra iterations is cheap if they fail quickly.
-    // But we need to distinguish algorithms if we want to be precise.
-    // For now, we try the list for all KDFs.
-
     let mut header_key = [0u8; 192]; 
 
     // Helper to try all ciphers
@@ -232,42 +269,41 @@ fn try_header_at_offset(password: &[u8], full_buffer: &[u8], pim: i32, offset: u
     for &iter in &iterations_list {
         // 1. SHA-512
         pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut header_key).ok();
-        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        if let Ok(vol) = try_unlock(&header_key) { return Ok(vol); }
 
         // 2. SHA-256
         pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut header_key).ok();
-        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        if let Ok(vol) = try_unlock(&header_key) { return Ok(vol); }
 
         // 3. Whirlpool
         pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut header_key).ok();
-        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        if let Ok(vol) = try_unlock(&header_key) { return Ok(vol); }
 
-        // 4. Blake2s (Only if iter is default or pim based, legacy TC didn't have Blake2s)
-        // Blake2s default is 500,000.
-        if iter == 500_000 || pim > 0 {
-             pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
-             if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
-        }
-        // Try Blake2s with 200,000 iterations (System Encryption / Boot)
-        if iter == 200_000 && pim == 0 {
-             pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
-             if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
-        }
+        // 4. Blake2s
+        // Blake2s default is 500,000. System/Boot is 200,000. PIM is pim*2048.
+        // We just use `iter` from the list which covers these cases.
+        pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
+        if let Ok(vol) = try_unlock(&header_key) { return Ok(vol); }
 
         // 5. Streebog
         pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut header_key).ok();
-        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        if let Ok(vol) = try_unlock(&header_key) { return Ok(vol); }
         
-        // 6. RIPEMD-160 (Different iterations)
-        // VC Default: 655331. TC Legacy: 1000 or 2000. System Encryption: 327661
-        let ripemd_iter = if pim > 0 { 15000 + (pim as u32 * 1000) } else { 
+        // 6. RIPEMD-160
+        // VC Default: 655331. TC Legacy: 1000 or 2000. System Encryption: 327661. PIM: 15000 + pim*1000.
+        // If PIM is provided, we use the calculated iter (15000+...).
+        // If PIM=0, we need to map 500,000 -> 655,331 and 200,000 -> 327,661.
+        let ripemd_iter = if pim > 0 { 
+             // For RIPEMD-160, PIM formula is same as others? Yes.
+             15000 + (pim as u32 * 1000) 
+        } else { 
             if iter == 500_000 { 655_331 } else if iter == 200_000 { 327_661 } else { iter } 
         };
         
         pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut header_key).ok();
         let res = try_unlock(&header_key);
         header_key.zeroize(); 
-        if let Ok(vol) = res { return register_context(vol); }
+        if let Ok(vol) = res { return Ok(vol); }
     }
 
     Err(VolumeError::InvalidPassword)
@@ -362,7 +398,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
             log::warn!("XTS Key Vulnerable");
         }
 
-        return Ok(Volume::new(header, vol_cipher, 0, false));
+        return Ok(Volume::new(header, vol_cipher, partition_start_offset, false));
     }
     Err(VolumeError::InvalidPassword)
 }
@@ -384,7 +420,7 @@ fn try_cipher_serpent(header_key: &[u8], encrypted_header: &[u8], partition_star
         let c1 = Serpent::new_from_slice(&mk[0..32]).map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
         let c2 = Serpent::new_from_slice(&mk[32..64]).map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
         let vol_cipher = SupportedCipher::Serpent(Xts128::new(c1, c2));
-        return Ok(Volume::new(header, vol_cipher, 0, false));
+        return Ok(Volume::new(header, vol_cipher, partition_start_offset, false));
     }
     Err(VolumeError::InvalidPassword)
 }
@@ -428,7 +464,6 @@ fn try_cipher_aes_twofish(header_key: &[u8], encrypted_header: &[u8], partition_
 }
 
 fn try_cipher_aes_twofish_serpent(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
-    // VeraCrypt: Serpent, Twofish, AES
     let key_serpent_1 = &header_key[0..32];
     let key_twofish_1 = &header_key[32..64];
     let key_aes_1 = &header_key[64..96];
@@ -436,6 +471,270 @@ fn try_cipher_aes_twofish_serpent(header_key: &[u8], encrypted_header: &[u8], pa
     let key_serpent_2 = &header_key[96..128];
     let key_twofish_2 = &header_key[128..160];
     let key_aes_2 = &header_key[160..192];
+
+    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_twofish = Xts128::new(Twofish::new(key_twofish_1.into()), Twofish::new(key_twofish_2.into()));
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+
+    let cipher_enum = SupportedCipher::AesTwofishSerpent(cipher_aes, cipher_twofish, cipher_serpent);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_serpent = &mk[0..64];
+        let mk_twofish = &mk[64..128];
+        let mk_aes = &mk[128..192];
+
+        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        
+        return Ok(Volume::new(header, SupportedCipher::AesTwofishSerpent(vol_aes, vol_twofish, vol_serpent), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_serpent_aes(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_aes_1 = &header_key[0..32];
+    let key_serpent_1 = &header_key[32..64];
+    let key_aes_2 = &header_key[64..96];
+    let key_serpent_2 = &header_key[96..128];
+
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+
+    let cipher_enum = SupportedCipher::SerpentAes(cipher_serpent, cipher_aes);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_aes = &mk[0..64];
+        let mk_serpent = &mk[64..128];
+
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        
+        return Ok(Volume::new(header, SupportedCipher::SerpentAes(vol_serpent, vol_aes), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_twofish_serpent(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_serpent_1 = &header_key[0..32];
+    let key_twofish_1 = &header_key[32..64];
+    let key_serpent_2 = &header_key[64..96];
+    let key_twofish_2 = &header_key[96..128];
+
+    let cipher_twofish = Xts128::new(Twofish::new(key_twofish_1.into()), Twofish::new(key_twofish_2.into()));
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+
+    let cipher_enum = SupportedCipher::TwofishSerpent(cipher_twofish, cipher_serpent);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_serpent = &mk[0..64];
+        let mk_twofish = &mk[64..128];
+
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        
+        return Ok(Volume::new(header, SupportedCipher::TwofishSerpent(vol_twofish, vol_serpent), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_serpent_twofish_aes(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_aes_1 = &header_key[0..32];
+    let key_twofish_1 = &header_key[32..64];
+    let key_serpent_1 = &header_key[64..96];
+    let key_aes_2 = &header_key[96..128];
+    let key_twofish_2 = &header_key[128..160];
+    let key_serpent_2 = &header_key[160..192];
+
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+    let cipher_twofish = Xts128::new(Twofish::new(key_twofish_1.into()), Twofish::new(key_twofish_2.into()));
+    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+
+    let cipher_enum = SupportedCipher::SerpentTwofishAes(cipher_serpent, cipher_twofish, cipher_aes);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_aes = &mk[0..64];
+        let mk_twofish = &mk[64..128];
+        let mk_serpent = &mk[128..192];
+
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
+        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        
+        return Ok(Volume::new(header, SupportedCipher::SerpentTwofishAes(vol_serpent, vol_twofish, vol_aes), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_camellia(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    try_cipher::<CamelliaWrapper>(header_key, encrypted_header, partition_start_offset, |k1, k2| {
+        SupportedCipher::Camellia(Xts128::new(CamelliaWrapper::new(k1.into()), CamelliaWrapper::new(k2.into())))
+    })
+}
+
+fn try_cipher_kuznyechik(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    try_cipher::<KuznyechikWrapper>(header_key, encrypted_header, partition_start_offset, |k1, k2| {
+        SupportedCipher::Kuznyechik(Xts128::new(KuznyechikWrapper::new(k1.into()), KuznyechikWrapper::new(k2.into())))
+    })
+}
+
+fn try_cipher_camellia_kuznyechik(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_kuznyechik_1 = &header_key[0..32];
+    let key_camellia_1 = &header_key[32..64];
+    let key_kuznyechik_2 = &header_key[64..96];
+    let key_camellia_2 = &header_key[96..128];
+
+    let cipher_camellia = Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into()));
+    let cipher_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()));
+
+    let cipher_enum = SupportedCipher::CamelliaKuznyechik(cipher_camellia, cipher_kuznyechik);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_kuznyechik = &mk[0..64];
+        let mk_camellia = &mk[64..128];
+
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
+        
+        return Ok(Volume::new(header, SupportedCipher::CamelliaKuznyechik(vol_camellia, vol_kuznyechik), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_camellia_serpent(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_serpent_1 = &header_key[0..32];
+    let key_camellia_1 = &header_key[32..64];
+    let key_serpent_2 = &header_key[64..96];
+    let key_camellia_2 = &header_key[96..128];
+
+    let cipher_camellia = Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into()));
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+
+    let cipher_enum = SupportedCipher::CamelliaSerpent(cipher_camellia, cipher_serpent);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_serpent = &mk[0..64];
+        let mk_camellia = &mk[64..128];
+
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        
+        return Ok(Volume::new(header, SupportedCipher::CamelliaSerpent(vol_camellia, vol_serpent), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_kuznyechik_aes(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_aes_1 = &header_key[0..32];
+    let key_kuznyechik_1 = &header_key[32..64];
+    let key_aes_2 = &header_key[64..96];
+    let key_kuznyechik_2 = &header_key[96..128];
+
+    let cipher_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()));
+    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+
+    let cipher_enum = SupportedCipher::KuznyechikAes(cipher_kuznyechik, cipher_aes);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_aes = &mk[0..64];
+        let mk_kuznyechik = &mk[64..128];
+
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
+        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        
+        return Ok(Volume::new(header, SupportedCipher::KuznyechikAes(vol_kuznyechik, vol_aes), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_kuznyechik_serpent_camellia(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_camellia_1 = &header_key[0..32];
+    let key_serpent_1 = &header_key[32..64];
+    let key_kuznyechik_1 = &header_key[64..96];
+    let key_camellia_2 = &header_key[96..128];
+    let key_serpent_2 = &header_key[128..160];
+    let key_kuznyechik_2 = &header_key[160..192];
+
+    let cipher_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()));
+    let cipher_serpent = Xts128::new(Serpent::new_from_slice(key_serpent_1).unwrap(), Serpent::new_from_slice(key_serpent_2).unwrap());
+    let cipher_camellia = Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into()));
+
+    let cipher_enum = SupportedCipher::KuznyechikSerpentCamellia(cipher_kuznyechik, cipher_serpent, cipher_camellia);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_camellia = &mk[0..64];
+        let mk_serpent = &mk[64..128];
+        let mk_kuznyechik = &mk[128..192];
+
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
+        
+        return Ok(Volume::new(header, SupportedCipher::KuznyechikSerpentCamellia(vol_kuznyechik, vol_serpent, vol_camellia), partition_start_offset, false));
+    }
+    Err(VolumeError::InvalidPassword)
+}
+
+fn try_cipher_kuznyechik_twofish(header_key: &[u8], encrypted_header: &[u8], partition_start_offset: u64) -> Result<Volume, VolumeError> {
+    let key_twofish_1 = &header_key[0..32];
+    let key_kuznyechik_1 = &header_key[32..64];
+    let key_twofish_2 = &header_key[64..96];
+    let key_kuznyechik_2 = &header_key[96..128];
+
+    let cipher_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()));
+    let cipher_twofish = Xts128::new(Twofish::new(key_twofish_1.into()), Twofish::new(key_twofish_2.into()));
+
+    let cipher_enum = SupportedCipher::KuznyechikTwofish(cipher_kuznyechik, cipher_twofish);
+    
+    let mut decrypted = [0u8; 448];
+    decrypted.copy_from_slice(encrypted_header);
+    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+        let mk = &header.master_key_data;
+        let mk_twofish = &mk[0..64];
+        let mk_kuznyechik = &mk[64..128];
+
         let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
         let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
         

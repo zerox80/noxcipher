@@ -92,6 +92,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     header: jbyteArray,
     pim: jni::sys::jint,
     partition_offset: jlong,
+    protection_password: jbyteArray,
+    protection_pim: jni::sys::jint,
 ) -> jlong {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         log::info!("Rust init called");
@@ -113,11 +115,35 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             }
         };
 
-        let res = volume::create_context(&password_bytes, &header_bytes, pim as i32, partition_offset as u64);
+        // Handle protection password
+        let mut protection_password_bytes = if !protection_password.is_null() {
+             let prot_obj = unsafe { JByteArray::from_raw(protection_password) };
+             match env.convert_byte_array(&prot_obj) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    log::warn!("Invalid protection password array: {}", e);
+                    None
+                }
+             }
+        } else {
+            None
+        };
+
+        let res = volume::create_context(
+            &password_bytes, 
+            &header_bytes, 
+            pim as i32, 
+            partition_offset as u64,
+            protection_password_bytes.as_deref(),
+            protection_pim as i32
+        );
         
-        // Zeroize password
+        // Zeroize passwords
         use zeroize::Zeroize;
         password_bytes.zeroize();
+        if let Some(ref mut pp) = protection_password_bytes {
+            pp.zeroize();
+        }
         
         match res {
             Ok(handle) => {

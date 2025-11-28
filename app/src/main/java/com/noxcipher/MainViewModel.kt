@@ -268,9 +268,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     // For Hidden, it's also near end.
                                     
                                     physicalDriver.read(offset, headerBuffer)
-                                    val headerBytes = headerBuffer.array().copyOfRange(0, 512) // Take first 512
+                                    val headerBytes = headerBuffer.array() // Pass full 128KB buffer to allow Hidden Volume check
                                     
-                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset)
+                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset, null, 0)
                                     if (handle != null && handle > 0) {
                                         lastError = "Success ($type)"
                                         break
