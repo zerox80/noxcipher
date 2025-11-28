@@ -10,6 +10,7 @@ class PartitionDriver(
     private val length: Long
 ) : BlockDeviceDriver {
     override val blockSize: Int get() = parent.blockSize
+    override val blocks: Long get() = length / blockSize
 
     override fun init() {
         // Parent already init
@@ -42,9 +43,9 @@ class PartitionDriver(
         parent.write(offset + deviceOffset, buffer)
     }
 
-    override fun flush() {
-        parent.flush()
-    }
+    // override fun flush() {
+    //    parent.flush()
+    // }
 }
 
 object GptUtils {

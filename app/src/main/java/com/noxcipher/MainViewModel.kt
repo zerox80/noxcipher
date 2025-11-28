@@ -66,12 +66,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     activeDevice = device
 
                     // Try to get partitions from libaums
+                    // We cast to BlockDeviceDriver list because Partition implements it (usually)
+                    // or we map it if needed. In 0.10.0 Partition implements BlockDeviceDriver.
                     var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
                     
                     // Fallback: Manual GPT parsing if no partitions found
                     if (partitions.isEmpty()) {
                         try {
-                            val manualPartitions = com.noxcipher.util.GptUtils.parseGpt(device.blockDevice)
+                            // Use reflection to get the raw block device driver from UsbMassStorageDevice
+                            // It's usually a private field 'blockDevice'
+                            val blockDeviceField = UsbMassStorageDevice::class.java.getDeclaredField("blockDevice")
+                            blockDeviceField.isAccessible = true
+                            val rawDriver = blockDeviceField.get(device) as me.jahnen.libaums.core.driver.BlockDeviceDriver
+                            
+                            val manualPartitions = com.noxcipher.util.GptUtils.parseGpt(rawDriver)
                             if (manualPartitions.isNotEmpty()) {
                                 partitions = manualPartitions
                             }
@@ -135,9 +143,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!success) {
                          _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_wrong_credentials, lastError ?: "No valid volume found")))
                          closeConnection()
-                    } finally {
-                         // Password clear handled in outer finally
                     }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_generic, e.message)))
+                    closeConnection()
+                } finally {
+                    password.fill(0)
+                }
             }
         }
     }
