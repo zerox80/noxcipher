@@ -23,7 +23,7 @@ object RustNative {
         }
     }
 
-    private external fun initLogger()
+    external fun initLogger()
 
     /**
      * Initializes the Veracrypt volume.

@@ -48,15 +48,13 @@ class PartitionDriver(
     // }
 }
 
-object GptUtils {
+object PartitionUtils {
     fun parseGpt(device: BlockDeviceDriver): List<BlockDeviceDriver> {
         val blockSize = device.blockSize
         val buffer = ByteBuffer.allocate(blockSize)
         buffer.order(ByteOrder.LITTLE_ENDIAN)
         
         // Read LBA 1 (GPT Header)
-        // If blockSize is 512, LBA 1 is at 512.
-        // If blockSize is 4096, LBA 1 is at 4096.
         try {
             device.read(blockSize.toLong(), buffer)
         } catch (e: Exception) {
@@ -74,18 +72,14 @@ object GptUtils {
         }
         
         // Parse Header
-        // Number of partition entries at offset 80 (4 bytes)
         val numEntries = buffer.getInt(80)
-        // Size of partition entry at offset 84 (4 bytes)
         val entrySize = buffer.getInt(84)
-        // Partition entries starting LBA at offset 72 (8 bytes)
         val entriesStartLba = buffer.getLong(72)
         
         val partitions = mutableListOf<BlockDeviceDriver>()
         
         // Read entries
         val totalEntriesSize = numEntries * entrySize
-        // Round up to block size
         val blocksToRead = (totalEntriesSize + blockSize - 1) / blockSize
         val readBuffer = ByteBuffer.allocate(blocksToRead * blockSize)
         readBuffer.order(ByteOrder.LITTLE_ENDIAN)
@@ -101,18 +95,13 @@ object GptUtils {
             val entryOffset = i * entrySize
             readBuffer.position(entryOffset)
             
-            // Check Partition Type GUID (first 16 bytes). If all zero, it's unused.
             val typeGuid1 = readBuffer.getLong()
             val typeGuid2 = readBuffer.getLong()
             
             if (typeGuid1 == 0L && typeGuid2 == 0L) continue
             
-            // Unique Partition GUID (next 16 bytes) - skip
             readBuffer.position(entryOffset + 32)
-            
-            // First LBA (8 bytes)
             val firstLba = readBuffer.getLong()
-            // Last LBA (8 bytes)
             val lastLba = readBuffer.getLong()
             
             if (firstLba > 0 && lastLba >= firstLba) {
@@ -122,6 +111,46 @@ object GptUtils {
             }
         }
         
+        return partitions
+    }
+
+    fun parseMbr(device: BlockDeviceDriver): List<BlockDeviceDriver> {
+        val blockSize = device.blockSize
+        val buffer = ByteBuffer.allocate(blockSize)
+        buffer.order(ByteOrder.LITTLE_ENDIAN)
+
+        try {
+            device.read(0, buffer)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return emptyList()
+        }
+
+        // Check signature 0x55AA at offset 510
+        if (buffer.get(510).toInt().and(0xFF) != 0x55 || buffer.get(511).toInt().and(0xFF) != 0xAA) {
+            return emptyList()
+        }
+
+        val partitions = mutableListOf<BlockDeviceDriver>()
+        
+        // Read 4 partition entries starting at offset 446
+        for (i in 0 until 4) {
+            val entryOffset = 446 + i * 16
+            val type = buffer.get(entryOffset + 4).toInt().and(0xFF)
+            
+            if (type == 0) continue
+            
+            // LBA Start (4 bytes) at offset 8
+            val lbaStart = buffer.getInt(entryOffset + 8).toLong().and(0xFFFFFFFFL)
+            // Number of Sectors (4 bytes) at offset 12
+            val sectorCount = buffer.getInt(entryOffset + 12).toLong().and(0xFFFFFFFFL)
+            
+            if (lbaStart > 0 && sectorCount > 0) {
+                 val startByte = lbaStart * blockSize
+                 val lengthBytes = sectorCount * blockSize
+                 partitions.add(PartitionDriver(device, startByte, lengthBytes))
+            }
+        }
         return partitions
     }
 }

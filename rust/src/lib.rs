@@ -34,6 +34,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     pim: jni::sys::jint,
 ) -> jlong {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        log::info!("Rust init called");
         let password_obj = unsafe { JByteArray::from_raw(password) };
         let password_bytes = match env.convert_byte_array(&password_obj) {
             Ok(b) => b,
@@ -53,7 +54,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         };
 
         match volume::create_context(&password_bytes, &header_bytes, pim as i32) {
-            Ok(handle) => handle,
+            Ok(handle) => {
+                log::info!("Init success, handle: {}", handle);
+                handle
+            },
             Err(e) => {
                 log::error!("Init failed: {}", e);
                 let _ = env.throw_new("java/io/IOException", format!("Init failed: {}", e));
@@ -64,8 +68,16 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
 
     match result {
         Ok(val) => val,
-        Err(_) => {
-            log::error!("Panic in init");
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("Panic in init: {}", s)
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("Panic in init: {}", s)
+            } else {
+                "Panic in init: unknown cause".to_string()
+            };
+            log::error!("{}", msg);
+            let _ = env.throw_new("java/lang/RuntimeException", msg);
             -1
         }
     }

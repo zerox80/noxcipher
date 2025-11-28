@@ -17,6 +17,12 @@ class NoxCipherApp : Application() {
     override fun onCreate() {
         super.onCreate()
         
+        try {
+            RustNative.initLogger()
+        } catch (e: Exception) {
+            Log.e("NoxCipherApp", "Failed to init rust logger", e)
+        }
+        
         // Setup global exception handler
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->

@@ -70,27 +70,112 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // or we map it if needed. In 0.10.0 Partition implements BlockDeviceDriver.
                     var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
                     
-                    // Fallback: Manual GPT parsing if no partitions found
+                    // Fallback: Manual GPT/MBR parsing if no partitions found
                     if (partitions.isEmpty()) {
+                        var rawDriver: me.jahnen.libaums.core.driver.BlockDeviceDriver? = null
+                        val debugSb = StringBuilder()
+                        
                         try {
-                            // Use reflection to get the raw block device driver from UsbMassStorageDevice
-                            // It's usually a private field 'blockDevice'
-                            val blockDeviceField = UsbMassStorageDevice::class.java.getDeclaredField("blockDevice")
-                            blockDeviceField.isAccessible = true
-                            val rawDriver = blockDeviceField.get(device) as me.jahnen.libaums.core.driver.BlockDeviceDriver
+                            // blockDevice field is missing, try to create ScsiBlockDevice manually
+                            // 1. Get UsbCommunication
+                            val commField = UsbMassStorageDevice::class.java.getDeclaredField("usbCommunication")
+                            commField.isAccessible = true
+                            val comm = commField.get(device)
                             
-                            val manualPartitions = com.noxcipher.util.GptUtils.parseGpt(rawDriver)
-                            if (manualPartitions.isNotEmpty()) {
-                                partitions = manualPartitions
+                            if (comm != null) {
+                                // 2. Instantiate ScsiBlockDevice
+                                try {
+                                    val scsiClass = Class.forName("me.jahnen.libaums.core.driver.scsi.ScsiBlockDevice")
+                                    // Try to find constructor that takes UsbCommunication
+                                    val constructors = scsiClass.constructors
+                                    var constructor = constructors.find { 
+                                        it.parameterTypes.size == 1 && 
+                                        it.parameterTypes[0].isAssignableFrom(comm.javaClass) 
+                                    }
+                                    
+                                    if (constructor == null) {
+                                        // Try constructor with 2 args (UsbCommunication, listener/partitionTable?)
+                                        // Or maybe it takes the interface?
+                                        // Let's just try to find one that takes UsbCommunication as first arg
+                                         constructor = constructors.find { 
+                                            it.parameterTypes.isNotEmpty() && 
+                                            it.parameterTypes[0].isAssignableFrom(comm.javaClass) 
+                                        }
+                                    }
+
+                                    if (constructor != null) {
+                                        val args = arrayOfNulls<Any>(constructor.parameterCount)
+                                        args[0] = comm
+                                        
+                                        // Fill other args
+                                        val params = constructor.parameterTypes
+                                        for (i in 1 until params.size) {
+                                            if (params[i] == Byte::class.javaPrimitiveType || params[i] == Byte::class.java) {
+                                                args[i] = 0.toByte()
+                                            } else if (params[i] == Int::class.javaPrimitiveType || params[i] == Int::class.java) {
+                                                args[i] = 0
+                                            } else if (params[i] == Long::class.javaPrimitiveType || params[i] == Long::class.java) {
+                                                args[i] = 0L
+                                            } else if (params[i] == Boolean::class.javaPrimitiveType || params[i] == Boolean::class.java) {
+                                                args[i] = false
+                                            }
+                                        }
+                                        
+                                        rawDriver = constructor.newInstance(*args) as me.jahnen.libaums.core.driver.BlockDeviceDriver
+                                        rawDriver.init()
+                                    } else {
+                                        debugSb.append("\nNo suitable ScsiBlockDevice constructor found.")
+                                        debugSb.append("\nConstructors: ")
+                                        constructors.forEach { c ->
+                                            debugSb.append(c.parameterTypes.joinToString { it.simpleName }).append("; ")
+                                        }
+                                    }
+                                } catch (e: ClassNotFoundException) {
+                                    debugSb.append("\nScsiBlockDevice class not found.")
+                                }
+                            } else {
+                                debugSb.append("\nUsbCommunication is null.")
+                            }
+                            
+                            if (rawDriver != null) {
+                                // Try GPT first
+                                var manualPartitions = com.noxcipher.util.PartitionUtils.parseGpt(rawDriver)
+                                if (manualPartitions.isEmpty()) {
+                                    // Try MBR
+                                    manualPartitions = com.noxcipher.util.PartitionUtils.parseMbr(rawDriver)
+                                }
+
+                                if (manualPartitions.isNotEmpty()) {
+                                    partitions = manualPartitions
+                                }
                             }
                         } catch (e: Exception) {
+                            debugSb.append("\nManual driver creation fail: ${e.javaClass.simpleName} ${e.message}")
                             e.printStackTrace()
                         }
-                    }
 
-                    if (partitions.isEmpty()) {
-                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_partitions)))
-                        return@withLock
+                        if (partitions.isEmpty()) {
+                             val sb = StringBuilder()
+                             sb.append("No partitions.")
+                             sb.append(debugSb.toString())
+                             
+                             if (rawDriver != null) {
+                                 try {
+                                     val debugBuf = ByteBuffer.allocate(512)
+                                     rawDriver.read(0, debugBuf)
+                                     val bytes = debugBuf.array()
+                                     val sig1 = bytes[510]
+                                     val sig2 = bytes[511]
+                                     val first16 = bytes.take(16).joinToString(" ") { "%02X".format(it) }
+                                     sb.append("\nMBR Sig: %02X %02X".format(sig1, sig2))
+                                     sb.append("\nStart: ").append(first16)
+                                 } catch (e: Exception) {
+                                     sb.append("\nRead fail: ${e.message}")
+                                 }
+                             }
+                            _connectionResult.emit(ConnectionResult.Error(sb.toString()))
+                            return@withLock
+                        }
                     }
                     
                     // Iterate over partitions and try to unlock
@@ -116,6 +201,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 continue
                             }
                             rustHandle = handle
+                            // Log handle
+                            lastError = "Handle: $handle"
         
                             // 3. Create Veracrypt Wrapper
                             val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle)
@@ -131,7 +218,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             break
                         } catch (e: Exception) {
                             e.printStackTrace()
-                            lastError = e.message
+                            val msg = e.message ?: "Unknown error"
+                            lastError = "Decrypt failed (Handle: $rustHandle): $msg"
                             // Close handle if it was opened but FS failed
                             rustHandle?.let { 
                                 RustNative.close(it) 

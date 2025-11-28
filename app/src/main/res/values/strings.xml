@@ -23,7 +23,7 @@
 
     <!-- MainViewModel Messages -->
     <string name="error_no_mass_storage">No USB Mass Storage devices found</string>
-    <string name="error_no_partitions">No partitions found. Ensure the drive uses MBR partition scheme.</string>
+    <string name="error_no_partitions">No partitions found. Ensure the drive uses MBR or GPT partition scheme.</string>
     <string name="error_wrong_credentials">Wrong password, PIM, or invalid volume: %1$s</string>
     <string name="error_fs_detection">Could not detect filesystem on decrypted volume</string>
     <string name="error_generic">Error: %1$s</string>

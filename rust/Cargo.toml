@@ -25,5 +25,9 @@ serpent = "0.5"
 twofish = "0.7"
 whirlpool = "0.10"
 ripemd = "0.1"
+blake2 = "0.10"
+streebog = "0.10"
+camellia = "0.1"
+kuznyechik = "0.4"
 
 
