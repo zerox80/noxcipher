@@ -48,7 +48,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun connectDevice(
         usbManager: UsbManager, // Kept for compatibility if needed, but libaums handles it
         password: ByteArray,
-        pim: Int
+        pim: Int,
+        protectionPassword: ByteArray? = null,
+        protectionPim: Int = 0
     ) {
         connectionJob?.cancel()
         
@@ -270,7 +272,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     physicalDriver.read(offset, headerBuffer)
                                     val headerBytes = headerBuffer.array() // Pass full 128KB buffer to allow Hidden Volume check
                                     
-                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset, null, 0)
+                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset, protectionPassword, protectionPim)
                                     if (handle != null && handle > 0) {
                                         lastError = "Success ($type)"
                                         break

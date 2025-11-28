@@ -86,10 +86,8 @@ impl Volume {
                 
                 // Calculate unit number (tweak)
                 // unitNo = startUnitNo + i
-                // startUnitNo = current_sector * units_per_sector
-                // unitNo = startUnitNo + i
-                // startUnitNo = (partition_start_offset + current_sector * sector_size) / 512
-                let start_unit_no = (self.partition_start_offset + current_sector * sector_size as u64) / 512;
+                // startUnitNo = (partition_start_offset + encrypted_area_start + current_sector * sector_size) / 512
+                let start_unit_no = (self.partition_start_offset + self.header.encrypted_area_start + current_sector * sector_size as u64) / 512;
                 let unit_no = start_unit_no + i as u64;
                 
                 self.cipher.decrypt_area(
@@ -115,7 +113,15 @@ impl Volume {
         // Check hidden volume protection
         if self.protected_range_end > 0 {
             // Check overlap
-            if (start_offset < self.protected_range_end) && (end_offset > self.protected_range_start) {
+            // protected_range is physical offset? Or logical?
+            // In create_context, we set it using `hidden_vol.header.encrypted_area_start`.
+            // That is physical offset relative to volume start.
+            // Here start_offset is logical.
+            // We must convert start_offset to physical.
+            let phys_start = self.header.encrypted_area_start + start_offset;
+            let phys_end = self.header.encrypted_area_start + end_offset;
+
+            if (phys_start < self.protected_range_end) && (phys_end > self.protected_range_start) {
                  return Err(VolumeError::CryptoError("Write operation blocked by Hidden Volume Protection".to_string()));
             }
         }
@@ -133,7 +139,7 @@ impl Volume {
                 let unit_offset = i * 512;
                 let unit_data_offset = offset + unit_offset;
                 
-                let start_unit_no = (self.partition_start_offset + current_sector * sector_size as u64) / 512;
+                let start_unit_no = (self.partition_start_offset + self.header.encrypted_area_start + current_sector * sector_size as u64) / 512;
                 let unit_no = start_unit_no + i as u64;
                 
                 self.cipher.encrypt_area(
