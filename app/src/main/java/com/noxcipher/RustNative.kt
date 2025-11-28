@@ -37,7 +37,7 @@ object RustNative {
      * @param pim The PIM value (0 for default).
      * @return A handle to the native context, or throws exception.
      */
-    external fun init(password: ByteArray, header: ByteArray, pim: Int): Long
+    external fun init(password: ByteArray, header: ByteArray, pim: Int, partitionOffset: Long): Long
 
     /**
      * Decrypts a buffer in-place.

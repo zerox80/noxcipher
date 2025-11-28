@@ -177,13 +177,13 @@ impl SupportedCipher {
             SupportedCipher::Serpent(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::Twofish(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);

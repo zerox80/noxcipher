@@ -91,6 +91,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     password: jbyteArray,
     header: jbyteArray,
     pim: jni::sys::jint,
+    partition_offset: jlong,
 ) -> jlong {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         log::info!("Rust init called");
@@ -112,7 +113,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             }
         };
 
-        let res = volume::create_context(&password_bytes, &header_bytes, pim as i32);
+        let res = volume::create_context(&password_bytes, &header_bytes, pim as i32, partition_offset as u64);
         
         // Zeroize password
         use zeroize::Zeroize;

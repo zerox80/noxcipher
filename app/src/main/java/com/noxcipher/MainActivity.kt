@@ -135,9 +135,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-                        }
-                    }
-                }
             }
             
             // Observe Logs

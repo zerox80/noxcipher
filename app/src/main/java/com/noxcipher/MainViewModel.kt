@@ -73,9 +73,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // or we map it if needed. In 0.10.0 Partition implements BlockDeviceDriver.
                     var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
                     
+                    var rawDriver: me.jahnen.libaums.core.driver.BlockDeviceDriver? = null
+                    
                     // Fallback: Manual GPT/MBR parsing if no partitions found
                     if (partitions.isEmpty()) {
-                        var rawDriver: me.jahnen.libaums.core.driver.BlockDeviceDriver? = null
                         val debugSb = StringBuilder()
                         
                         try {
@@ -199,7 +200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                          // If rawDriver is null, we can't do much.
                          if (rawDriver != null) listOf(rawDriver) else emptyList()
                     } else {
-                        emptyList()
+                        emptyList<me.jahnen.libaums.core.driver.BlockDeviceDriver>()
                     }
                     
                     val targets = if (partitions.isNotEmpty()) partitions else rawTarget
@@ -222,7 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             // But `blocks` might be 0 for some raw devices?
                             // Let's try to get size.
                             val volSize = try {
-                                physicalDriver.blocks * physicalDriver.blockSize
+                                physicalDriver.blocks.toLong() * physicalDriver.blockSize
                             } catch (e: Exception) {
                                 0L
                             }
@@ -233,6 +234,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             
                             if (volSize > 131072) {
                                 candidates.add((volSize - 131072) to "Backup")
+                                candidates.add((volSize - 65536) to "Backup Hidden")
+                            }
+                            
+                            // Get partition offset for XTS tweak
+                            val partitionOffset = if (physicalDriver is me.jahnen.libaums.core.partition.Partition) {
+                                // Partition usually has offset. But libaums Partition class might not expose it publicly as a field?
+                                // It extends BlockDeviceDriver.
+                                // Let's check if we can access it.
+                                // In libaums 0.10.0, Partition has `partitionTableEntry`.
+                                // PartitionTableEntry has `logicalBlockAddress`.
+                                // offset = lba * blockSize.
+                                try {
+                                    val entry = physicalDriver.partitionTableEntry
+                                    entry.logicalBlockAddress * physicalDriver.blockSize.toLong()
+                                } catch (e: Exception) {
+                                    0L
+                                }
+                            } else {
+                                0L
                             }
                             
                             var handle: Long? = null
@@ -250,7 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     physicalDriver.read(offset, headerBuffer)
                                     val headerBytes = headerBuffer.array().copyOfRange(0, 512) // Take first 512
                                     
-                                    handle = RustNative.init(password, headerBytes, pim)
+                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset)
                                     if (handle != null && handle > 0) {
                                         lastError = "Success ($type)"
                                         break
