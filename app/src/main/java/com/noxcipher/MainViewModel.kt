@@ -185,30 +185,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var success = false
                     var lastError: String? = null
 
-                    for (partition in partitions) {
+                    // If no partitions found, try the raw device itself
+                    val targets = if (partitions.isNotEmpty()) partitions else listOf(activeDevice!!)
+
+                    for (partition in targets) {
                         try {
                             val physicalDriver = partition
                             
-                            // 1. Read Header (first 128KB)
-                            val headerSize = 128 * 1024
-                            val headerBuffer = ByteBuffer.allocate(headerSize)
-                            physicalDriver.read(0, headerBuffer)
+                            // We need to try 3 candidates:
+                            // 1. Primary Header (Offset 0)
+                            // 2. Backup Header (Offset VolumeSize - 128KB)
+                            // 3. Hidden Volume Header (Offset VolumeSize - 64KB) - Wait, hidden is at 64KB before end?
+                            // VeraCrypt:
+                            // Primary: 0
+                            // Backup: VolumeSize - 131072 (128KB)
+                            // Hidden: VolumeSize - 65536 (64KB)
                             
-                            // 2. Initialize Rust Crypto
-                            val headerBytes = headerBuffer.array()
-                            val handle = try {
-                                 RustNative.init(password, headerBytes, pim)
+                            // We need volume size.
+                            // libaums BlockDeviceDriver has `blocks` and `blockSize`.
+                            // But `blocks` might be 0 for some raw devices?
+                            // Let's try to get size.
+                            val volSize = try {
+                                physicalDriver.blocks * physicalDriver.blockSize
                             } catch (e: Exception) {
-                                // Wrong password or not a veracrypt partition
-                                lastError = e.message
+                                0L
+                            }
+                            
+                            val candidates = mutableListOf<Pair<Long, String>>()
+                            candidates.add(0L to "Primary")
+                            candidates.add(65536L to "Hidden")
+                            
+                            if (volSize > 131072) {
+                                candidates.add((volSize - 131072) to "Backup")
+                            }
+                            
+                            var handle: Long? = null
+                            
+                            for ((offset, type) in candidates) {
+                                try {
+                                    val headerBuffer = ByteBuffer.allocate(131072) // Read 128KB just in case, though header is 512 bytes + salt
+                                    // Actually we only need 512 bytes for the header itself, but salt is first 64.
+                                    // Rust expects 512 bytes (salt + header).
+                                    // If we read at offset, we read 512 bytes.
+                                    
+                                    // Wait, for Backup Header, it's at the END.
+                                    // For Hidden, it's also near end.
+                                    
+                                    physicalDriver.read(offset, headerBuffer)
+                                    val headerBytes = headerBuffer.array().copyOfRange(0, 512) // Take first 512
+                                    
+                                    handle = RustNative.init(password, headerBytes, pim)
+                                    if (handle != null && handle > 0) {
+                                        lastError = "Success ($type)"
+                                        break
+                                    }
+                                } catch (e: Exception) {
+                                    // Failed this candidate
+                                    lastError = "Failed $type: ${e.message}"
+                                }
+                            }
+
+                            if (handle == null || handle <= 0) {
                                 continue
                             }
+                            
                             rustHandle = handle
-                            // Log handle
-                            lastError = "Handle: $handle"
-        
+                            val dataOffset = RustNative.getDataOffset(handle)
+                            
                             // 3. Create Veracrypt Wrapper
-                            val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle)
+                            val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle, dataOffset)
                             
                             // 4. Mount Filesystem
                             val dummyEntry = PartitionTableEntry(0x0c, 0, 0)

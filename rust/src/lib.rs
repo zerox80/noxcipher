@@ -1,15 +1,17 @@
 use jni::JNIEnv;
 use jni::objects::{JClass, JByteArray};
 use jni::sys::{jbyteArray, jlong};
-use android_logger::Config;
+
 use log::LevelFilter;
 use std::panic;
 
 mod volume;
+mod crypto;
+mod header;
 
 use std::sync::Mutex;
 use lazy_static::lazy_static;
-use jni::objects::{JObject, JString, JValue};
+
 use jni::sys::jobjectArray;
 
 lazy_static! {
@@ -28,14 +30,12 @@ impl log::Log for InMemoryLogger {
             let log_msg = format!("{}: {}", record.level(), record.args());
             
             // Print to Android Logcat
-            let tag = std::ffi::CString::new("RustNative").unwrap();
-            let msg = std::ffi::CString::new(log_msg.clone()).unwrap();
-            unsafe {
-                // Simple android logging via FFI if possible, or just rely on println! which often redirects
-                // But since we can't easily link android log without crate, let's just store it.
-                // Actually android_logger does this. We can't chain loggers easily without a helper crate.
-                // For now, we prioritize the in-memory buffer for the user.
-            }
+            let _tag = std::ffi::CString::new("RustNative").unwrap();
+            let _msg = std::ffi::CString::new(log_msg.clone()).unwrap();
+            // Simple android logging via FFI if possible, or just rely on println! which often redirects
+            // But since we can't easily link android log without crate, let's just store it.
+            // Actually android_logger does this. We can't chain loggers easily without a helper crate.
+            // For now, we prioritize the in-memory buffer for the user.
             
             // Store in buffer
             if let Ok(mut buffer) = LOG_BUFFER.lock() {
@@ -95,7 +95,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         log::info!("Rust init called");
         let password_obj = unsafe { JByteArray::from_raw(password) };
-        let password_bytes = match env.convert_byte_array(&password_obj) {
+        let mut password_bytes = match env.convert_byte_array(&password_obj) {
             Ok(b) => b,
             Err(e) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid password array: {}", e));
@@ -112,7 +112,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             }
         };
 
-        match volume::create_context(&password_bytes, &header_bytes, pim as i32) {
+        let res = volume::create_context(&password_bytes, &header_bytes, pim as i32);
+        
+        // Zeroize password
+        use zeroize::Zeroize;
+        password_bytes.zeroize();
+        
+        match res {
             Ok(handle) => {
                 log::info!("Init success, handle: {}", handle);
                 handle
@@ -239,4 +245,27 @@ pub extern "system" fn Java_com_noxcipher_RustNative_close(
     let _ = panic::catch_unwind(|| {
         volume::close_context(handle);
     });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    let res = panic::catch_unwind(|| {
+        volume::get_data_offset(handle)
+    });
+    
+    match res {
+        Ok(Ok(offset)) => offset as jlong,
+        Ok(Err(e)) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", format!("{}", e));
+            -1
+        },
+        Err(_) => {
+            let _ = env.throw_new("java/lang/RuntimeException", "Panic in getDataOffset");
+            -1
+        }
+    }
 }

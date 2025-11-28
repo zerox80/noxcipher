@@ -60,4 +60,11 @@ object RustNative {
      * @param handle The native context handle.
      */
     external fun close(handle: Long)
+
+    /**
+     * Gets the encrypted area start offset (data offset).
+     * @param handle The native context handle.
+     * @return The offset in bytes.
+     */
+    external fun getDataOffset(handle: Long): Long
 }
