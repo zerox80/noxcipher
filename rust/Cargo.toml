@@ -31,6 +31,6 @@ streebog = "0.10"
 camellia = "0.1"
 kuznyechik = "0.4"
 
-zeroize = "1.6"
+zeroize = { version = "1.6", features = ["derive"] }
 
 

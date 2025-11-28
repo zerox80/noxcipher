@@ -148,7 +148,7 @@ pub enum SupportedCipher {
 }
 
 impl SupportedCipher {
-    pub fn decrypt_area(&self, data: &mut [u8], sector_size: usize, sector_index: u64, encrypted_area_start: u64) {
+    pub fn decrypt_area(&self, data: &mut [u8], sector_size: usize, sector_index: u64) {
         // Tweak calculation:
         // VeraCrypt uses the logical sector number relative to the start of the volume.
         // However, for system encryption or partitions, it might be different.
@@ -182,40 +182,40 @@ impl SupportedCipher {
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::Camellia(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::Kuznyechik(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikSerpentCamellia(xts_kuznyechik, xts_serpent, xts_camellia) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
                 xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             },
         }
     }
@@ -233,49 +233,49 @@ impl SupportedCipher {
             SupportedCipher::Serpent(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::Twofish(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::Camellia(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::Kuznyechik(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikSerpentCamellia(xts_kuznyechik, xts_serpent, xts_camellia) => {
-                xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
             },
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
             },
         }
     }
