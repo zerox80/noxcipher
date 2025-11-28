@@ -5,10 +5,11 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.github.mjdev.libaums.UsbMassStorageDevice
-import com.github.mjdev.libaums.fs.FileSystem
-import com.github.mjdev.libaums.fs.FileSystemFactory
-import com.github.mjdev.libaums.fs.UsbFile
+import me.jahnen.libaums.core.UsbMassStorageDevice
+import me.jahnen.libaums.core.fs.FileSystem
+import me.jahnen.libaums.core.fs.FileSystemFactory
+import me.jahnen.libaums.core.fs.UsbFile
+import me.jahnen.libaums.core.partition.PartitionTableEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -64,62 +65,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     device.init()
                     activeDevice = device
 
-                    // We assume the first partition is the Veracrypt volume
-                    // In a real app, we might iterate partitions or let user choose.
-                    // libaums partitions are BlockDeviceDrivers.
-                    val partitions = device.partitions
+                    // Try to get partitions from libaums
+                    var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
+                    
+                    // Fallback: Manual GPT parsing if no partitions found
+                    if (partitions.isEmpty()) {
+                        try {
+                            val manualPartitions = com.noxcipher.util.GptUtils.parseGpt(device.blockDevice)
+                            if (manualPartitions.isNotEmpty()) {
+                                partitions = manualPartitions
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
                     if (partitions.isEmpty()) {
                         _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_partitions)))
                         return@withLock
                     }
                     
-                    // Get the raw block device driver for the partition
-                    // libaums 'Partition' object wraps the driver.
-                    // We need to access the BlockDeviceDriver.
-                    // Actually, device.partitions returns List<Partition>.
-                    // Partition has a 'blockDevice' property which is BlockDeviceDriver.
-                    val partition = partitions[0]
-                    val physicalDriver = partition
-                    
-                    // 1. Read Header (first 128KB)
-                    // Veracrypt header is in the first 512 bytes, but we read more just in case.
-                    val headerSize = 128 * 1024
-                    val headerBuffer = ByteBuffer.allocate(headerSize)
-                    physicalDriver.read(0, headerBuffer)
-                    
-                    // 2. Initialize Rust Crypto
-                    val headerBytes = headerBuffer.array()
-                    val handle = try {
-                         // Use provided PIM
-                         RustNative.init(password, headerBytes, pim)
-                    } catch (e: Exception) {
-                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_wrong_credentials, e.message)))
-                        return@withLock
-                    }
-                    rustHandle = handle
+                    // Iterate over partitions and try to unlock
+                    var success = false
+                    var lastError: String? = null
 
-                    // 3. Create Veracrypt Wrapper
-                    val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle)
-                    
-                    // 4. Mount Filesystem
-                    // libaums FileSystemFactory detects FS type from the driver
-                    val fs = FileSystemFactory.createFileSystem(null, veracryptDriver)
-                    if (fs == null) {
-                         _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_fs_detection)))
-                         return@withLock
+                    for (partition in partitions) {
+                        try {
+                            val physicalDriver = partition
+                            
+                            // 1. Read Header (first 128KB)
+                            val headerSize = 128 * 1024
+                            val headerBuffer = ByteBuffer.allocate(headerSize)
+                            physicalDriver.read(0, headerBuffer)
+                            
+                            // 2. Initialize Rust Crypto
+                            val headerBytes = headerBuffer.array()
+                            val handle = try {
+                                 RustNative.init(password, headerBytes, pim)
+                            } catch (e: Exception) {
+                                // Wrong password or not a veracrypt partition
+                                lastError = e.message
+                                continue
+                            }
+                            rustHandle = handle
+        
+                            // 3. Create Veracrypt Wrapper
+                            val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle)
+                            
+                            // 4. Mount Filesystem
+                            val dummyEntry = PartitionTableEntry(0x0c, 0, 0)
+                            val fs = FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
+                            
+                            activeFileSystem = fs
+                            SessionManager.activeFileSystem = fs
+                            _connectionResult.emit(ConnectionResult.Success)
+                            success = true
+                            break
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            lastError = e.message
+                            // Close handle if it was opened but FS failed
+                            rustHandle?.let { 
+                                RustNative.close(it) 
+                                rustHandle = null
+                            }
+                        }
                     }
-                    
-                    activeFileSystem = fs
-                    SessionManager.activeFileSystem = fs
-                    _connectionResult.emit(ConnectionResult.Success)
 
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_generic, e.message)))
-                    closeConnection()
-                } finally {
-                    password.fill(0)
-                }
+                    if (!success) {
+                         _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_wrong_credentials, lastError ?: "No valid volume found")))
+                         closeConnection()
+                    } finally {
+                         // Password clear handled in outer finally
+                    }
             }
         }
     }

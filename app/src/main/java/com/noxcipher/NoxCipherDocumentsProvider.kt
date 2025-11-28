@@ -1,13 +1,13 @@
 package com.noxcipher
 
 import android.database.Cursor
-import android.database.MatrixCursor
-import android.os.CancellationSignal
-import android.os.ParcelFileDescriptor
+import me.jahnen.libaums.core.fs.UsbFile
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.webkit.MimeTypeMap
-import com.github.mjdev.libaums.fs.UsbFile
+import android.database.MatrixCursor
+import android.os.CancellationSignal
+import android.os.ParcelFileDescriptor
 import java.io.FileNotFoundException
 import java.io.IOException
 
@@ -167,7 +167,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         )
     }
 
-    private fun getFileForDocId(fs: com.github.mjdev.libaums.fs.FileSystem, docId: String): UsbFile {
+    private fun getFileForDocId(fs: me.jahnen.libaums.core.fs.FileSystem, docId: String): UsbFile {
         if (docId == "/") return fs.rootDirectory
         
         // Split path and traverse
@@ -225,7 +225,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     
     private fun getDocIdForFile(file: UsbFile): String {
         if (file.isRoot) return "/"
-        val parent = file.parent
+        val parent = file.parent ?: throw IllegalStateException("Parent is null for non-root file: ${file.name}")
         val parentId = if (parent.isRoot) "" else getDocIdForFile(parent)
         return "$parentId/${file.name}"
     }

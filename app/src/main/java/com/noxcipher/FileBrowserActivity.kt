@@ -7,7 +7,7 @@ import android.widget.ListView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.github.mjdev.libaums.fs.UsbFile
+import me.jahnen.libaums.core.fs.UsbFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

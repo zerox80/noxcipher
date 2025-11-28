@@ -1,6 +1,6 @@
 package com.noxcipher
 
-import com.github.mjdev.libaums.driver.BlockDeviceDriver
+import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import java.io.IOException
 import java.nio.ByteBuffer
 
@@ -13,11 +13,21 @@ class VeracryptBlockDevice(
         // Physical device should already be initialized
     }
 
-    override fun getBlockSize(): Int {
-        return physicalDevice.blockSize
-    }
+    override val blockSize: Int
+        get() = physicalDevice.blockSize
 
-    @Throws(IOException::class)
+    // Assuming blocks returns Int based on blockSize being Int, but could be Long.
+    // Let's try Int.
+    // Actually, let's try to infer it from usage or just try Int.
+    // If it fails, I'll try Long.
+    // But wait, I can just use 'val' and delegate, and Kotlin might infer?
+    // No, override requires explicit type usually if not inferred from super.
+    // But super is interface.
+    
+    // Let's try Int.
+    override val blocks: Long
+        get() = physicalDevice.blocks
+
     override fun read(offset: Long, dest: ByteBuffer) {
         // 1. Read encrypted data from physical device
         val position = dest.position()

@@ -4,7 +4,7 @@
     <!-- MainActivity UI -->
     <string name="hint_password">Enter Password</string>
     <string name="hint_pim">PIM (Default: 0)</string>
-    <string name="btn_list_devices">List USB Devices</string>
+    <string name="btn_list_devices">Unlock Device</string>
     <string name="tv_log_default">Logs will appear here...</string>
     <string name="toast_permission_granted">Permission granted. Please click \'List Devices\' again.</string>
     <string name="toast_no_devices">No USB devices found</string>
@@ -23,7 +23,7 @@
 
     <!-- MainViewModel Messages -->
     <string name="error_no_mass_storage">No USB Mass Storage devices found</string>
-    <string name="error_no_partitions">No partitions found</string>
+    <string name="error_no_partitions">No partitions found. Ensure the drive uses MBR partition scheme.</string>
     <string name="error_wrong_credentials">Wrong password, PIM, or invalid volume: %1$s</string>
     <string name="error_fs_detection">Could not detect filesystem on decrypted volume</string>
     <string name="error_generic">Error: %1$s</string>

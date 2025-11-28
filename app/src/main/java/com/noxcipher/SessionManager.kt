@@ -1,6 +1,6 @@
 package com.noxcipher
 
-import com.github.mjdev.libaums.fs.FileSystem
+import me.jahnen.libaums.core.fs.FileSystem
 
 object SessionManager {
     var activeFileSystem: FileSystem? = null

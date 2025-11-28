@@ -1,13 +1,15 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.rust.android)
+    // alias(libs.plugins.rust.android)
 }
 
 android {
     namespace = "com.noxcipher"
     compileSdk = 35
-    ndkVersion = "25.2.9519653" // Use a standard LTS NDK version
+    // ndkVersion = "25.2.9519653" // Use a standard LTS NDK version
 
     defaultConfig {
         applicationId = "com.noxcipher"
@@ -23,12 +25,12 @@ android {
         create("release") {
             val keystorePropertiesFile = rootProject.file("keystore.properties")
             if (keystorePropertiesFile.exists()) {
-                val keystoreProperties = java.util.Properties()
-                keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
-                storeFile = file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
+                val keystoreProperties = Properties()
+                keystoreProperties.load(keystorePropertiesFile.inputStream())
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
             }
         }
     }
@@ -52,20 +54,24 @@ android {
     }
 }
 
+/*
 cargo {
     module = "../rust"
     libname = "rust_noxcipher"
     targets = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
     profile = "release"
 }
+*/
 
 dependencies {
-
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.libaums)
-    implementation(libs.libaums.storageprovider)
+    // implementation(libs.libaums.storageprovider)
+    implementation(libs.androidx.activity.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

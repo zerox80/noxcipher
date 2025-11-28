@@ -11,6 +11,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:hint="@string/hint_password"
+        android:imeOptions="actionGo"
         android:inputType="textPassword" />
 
     <EditText
@@ -19,6 +20,7 @@
         android:layout_height="wrap_content"
         android:hint="@string/hint_pim"
         android:inputType="number"
+        android:imeOptions="actionGo"
         android:text="0" />
 
     <Button
@@ -26,6 +28,13 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/btn_list_devices" />
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/tvLog"

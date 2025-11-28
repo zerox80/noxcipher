@@ -17,6 +17,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
+import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,7 +30,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     // Use ViewModel to retain connection across config changes
-    private val viewModel: MainViewModel by androidx.activity.viewModels()
+    private val viewModel: MainViewModel by viewModels()
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -41,9 +43,24 @@ class MainActivity : AppCompatActivity() {
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     }
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        // Bug 1 Fix: Do not auto-connect as we don't have the password here securely.
-                        // The previous code `connectDevice(this)` was also missing the password argument, causing a crash/compilation error.
-                        Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_SHORT).show()
+                        
+                        // Auto-connect if password is available
+                        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
+                        val passwordText = etPassword.text
+                        if (!passwordText.isNullOrEmpty() && device != null) {
+                            val etPim = findViewById<android.widget.EditText>(R.id.etPim)
+                            val pimText = etPim.text.toString()
+                            val pim = if (pimText.isEmpty()) 0 else pimText.toIntOrNull() ?: 0
+
+                            val passwordBytes = ByteArray(passwordText.length)
+                            for (i in passwordText.indices) {
+                                passwordBytes[i] = passwordText[i].code.toByte()
+                            }
+                            
+                            connectDevice(device, passwordBytes, pim)
+                            passwordText.clear()
+                        }
                     } else {
                         log("Permission denied for device $device")
                     }
@@ -77,13 +94,24 @@ class MainActivity : AppCompatActivity() {
                 listDevices()
             }
 
+            val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
+            val etPim = findViewById<android.widget.EditText>(R.id.etPim)
+            
+            val editorListener = android.widget.TextView.OnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                    listDevices()
+                    true
+                } else {
+                    false
+                }
+            }
+            
+            etPassword.setOnEditorActionListener(editorListener)
+            etPim.setOnEditorActionListener(editorListener)
+
             val filter = IntentFilter(ACTION_USB_PERMISSION)
             filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                registerReceiver(usbReceiver, filter)
-            }
+            ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
             log("Receiver registered")
 
             // Observe ViewModel results
@@ -92,11 +120,15 @@ class MainActivity : AppCompatActivity() {
                     viewModel.connectionResult.collect { result ->
                         when (result) {
                             is ConnectionResult.Success -> {
+                                findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.GONE
+                                setInputsEnabled(true)
                                 log("Unlock successful")
                                 val intent = Intent(this@MainActivity, FileBrowserActivity::class.java)
                                 startActivity(intent)
                             }
                             is ConnectionResult.Error -> {
+                                findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.GONE
+                                setInputsEnabled(true)
                                 log(result.message)
                                 Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
                             }
@@ -174,8 +206,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectDevice(device: UsbDevice, passwordBytes: ByteArray, pim: Int) {
         log("Connecting to ${device.deviceName}...")
+        findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.VISIBLE
+        setInputsEnabled(false)
         // ViewModel handles device selection internally using libaums
         viewModel.connectDevice(usbManager, passwordBytes, pim)
+    }
+
+    private fun setInputsEnabled(enabled: Boolean) {
+        findViewById<android.view.View>(R.id.btnListDevices).isEnabled = enabled
+        findViewById<android.view.View>(R.id.etPassword).isEnabled = enabled
+        findViewById<android.view.View>(R.id.etPim).isEnabled = enabled
     }
 
     private fun log(message: String) {
