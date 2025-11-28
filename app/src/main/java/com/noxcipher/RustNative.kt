@@ -26,6 +26,11 @@ object RustNative {
     external fun initLogger()
 
     /**
+     * Retrieves the last 100 log lines from the native logger.
+     */
+    external fun getLogs(): Array<String>
+
+    /**
      * Initializes the Veracrypt volume.
      * @param password The password bytes.
      * @param header The first 128KB of the volume (containing the header).

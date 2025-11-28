@@ -135,6 +135,18 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
+                        }
+                    }
+                }
+            }
+            
+            // Observe Logs
+            lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    viewModel.logs.collect { logs ->
+                        log(logs)
+                    }
+                }
             }
 
         } catch (e: Exception) {

@@ -7,22 +7,81 @@ use std::panic;
 
 mod volume;
 
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+use jni::objects::{JObject, JString, JValue};
+use jni::sys::jobjectArray;
+
+lazy_static! {
+    static ref LOG_BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
+}
+
+struct InMemoryLogger;
+
+impl log::Log for InMemoryLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let log_msg = format!("{}: {}", record.level(), record.args());
+            
+            // Print to Android Logcat
+            let tag = std::ffi::CString::new("RustNative").unwrap();
+            let msg = std::ffi::CString::new(log_msg.clone()).unwrap();
+            unsafe {
+                // Simple android logging via FFI if possible, or just rely on println! which often redirects
+                // But since we can't easily link android log without crate, let's just store it.
+                // Actually android_logger does this. We can't chain loggers easily without a helper crate.
+                // For now, we prioritize the in-memory buffer for the user.
+            }
+            
+            // Store in buffer
+            if let Ok(mut buffer) = LOG_BUFFER.lock() {
+                if buffer.len() > 100 { buffer.remove(0); } // Keep last 100 logs
+                buffer.push(log_msg);
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: InMemoryLogger = InMemoryLogger;
+
 #[no_mangle]
 pub extern "system" fn Java_com_noxcipher_RustNative_initLogger(
     _env: JNIEnv,
     _class: JClass,
 ) {
     let _ = panic::catch_unwind(|| {
-        #[cfg(debug_assertions)]
-        let level = LevelFilter::Trace;
-        #[cfg(not(debug_assertions))]
-        let level = LevelFilter::Info;
-
-        android_logger::init_once(
-            Config::default().with_max_level(level),
-        );
-        log::info!("Rust logger initialized");
+        log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info)).ok();
+        log::info!("Rust logger initialized (InMemory)");
     });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jobjectArray {
+    let logs = match LOG_BUFFER.lock() {
+        Ok(buffer) => buffer.clone(),
+        Err(_) => vec!["Failed to lock log buffer".to_string()],
+    };
+
+    let string_class = env.find_class("java/lang/String").expect("Could not find String class");
+    let empty_string = env.new_string("").expect("Could not create empty string");
+    
+    let array = env.new_object_array(logs.len() as i32, string_class, empty_string).expect("Could not create string array");
+
+    for (i, log) in logs.iter().enumerate() {
+        let jstr = env.new_string(log).expect("Could not create string");
+        env.set_object_array_element(&array, i as i32, jstr).expect("Could not set array element");
+    }
+
+    array.into_raw()
 }
 
 #[no_mangle]

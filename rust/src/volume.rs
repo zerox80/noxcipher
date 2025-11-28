@@ -1,9 +1,180 @@
+use aes::Aes256;
+use xts_mode::{Xts128, get_tweak_default};
+use pbkdf2::pbkdf2;
+use hmac::{Hmac, SimpleHmac};
+use sha2::{Sha512, Sha256};
+use whirlpool::Whirlpool;
+use serpent::Serpent;
+use twofish::Twofish;
+use blake2::Blake2s256;
 use streebog::Streebog512;
 use camellia::Camellia256;
 use kuznyechik::Kuznyechik;
+
 use std::sync::Mutex;
 use std::fmt;
-use cipher::KeyInit;
+use cipher::{KeyInit, BlockCipher, BlockEncrypt, BlockDecrypt, Key, Block, KeySizeUser, BlockSizeUser, ParBlocksSizeUser, BlockBackend};
+use cipher::consts::{U32, U16, U1};
+use cipher::generic_array::GenericArray;
+use cipher::inout::InOut;
+use kuznyechik::block_cipher::{NewBlockCipher, BlockCipher as OldBlockCipher};
+use byteorder::{BigEndian, ByteOrder};
+
+fn validate_header(decrypted: &[u8]) -> Result<u32, VolumeError> {
+    if decrypted.len() != 448 { return Err(VolumeError::InvalidHeader); }
+    
+    // Check Magic "VERA"
+    if &decrypted[0..4] != b"VERA" {
+        return Err(VolumeError::InvalidPassword);
+    }
+    
+    // Check Header CRC (offset 252 - 64 = 188)
+    let header_crc_stored = BigEndian::read_u32(&decrypted[188..192]);
+    let header_crc_calc = crc32fast::hash(&decrypted[0..188]);
+    if header_crc_stored != header_crc_calc {
+        log::warn!("Header CRC mismatch");
+        return Err(VolumeError::InvalidPassword);
+    }
+    
+    // Check Key Area CRC (offset 72 - 64 = 8)
+    // Key area starts at 256 - 64 = 192, length 256
+    let key_crc_stored = BigEndian::read_u32(&decrypted[8..12]);
+    let key_crc_calc = crc32fast::hash(&decrypted[192..448]);
+    if key_crc_stored != key_crc_calc {
+        log::warn!("Key Area CRC mismatch");
+        return Err(VolumeError::InvalidPassword);
+    }
+    
+    // Read Sector Size (offset 128 - 64 = 64)
+    let sector_size = BigEndian::read_u32(&decrypted[64..68]);
+    
+    if sector_size < 512 || sector_size > 4096 || sector_size % 128 != 0 {
+         log::error!("Invalid sector size: {}", sector_size);
+         return Err(VolumeError::InvalidHeader);
+    }
+    
+    Ok(sector_size)
+}
+
+struct KuznyechikWrapper(kuznyechik::Kuznyechik);
+
+impl KeySizeUser for KuznyechikWrapper {
+    type KeySize = U32;
+}
+
+impl KeyInit for KuznyechikWrapper {
+    fn new(key: &Key<Self>) -> Self {
+        KuznyechikWrapper(kuznyechik::Kuznyechik::new(key))
+    }
+}
+
+impl BlockSizeUser for KuznyechikWrapper {
+    type BlockSize = U16;
+}
+
+impl BlockCipher for KuznyechikWrapper {}
+
+struct KuznyechikEncryptBackend<'a>(&'a kuznyechik::Kuznyechik);
+
+impl<'a> BlockSizeUser for KuznyechikEncryptBackend<'a> {
+    type BlockSize = U16;
+}
+impl<'a> ParBlocksSizeUser for KuznyechikEncryptBackend<'a> {
+    type ParBlocksSize = U1;
+}
+impl<'a> BlockBackend for KuznyechikEncryptBackend<'a> {
+    fn proc_block(&mut self, mut block: InOut<'_, '_, Block<Self>>) {
+        self.0.encrypt_block(block.get_out());
+    }
+}
+
+impl BlockEncrypt for KuznyechikWrapper {
+    fn encrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        let mut backend = KuznyechikEncryptBackend(&self.0);
+        f.call(&mut backend);
+    }
+}
+
+struct KuznyechikDecryptBackend<'a>(&'a kuznyechik::Kuznyechik);
+
+impl<'a> BlockSizeUser for KuznyechikDecryptBackend<'a> {
+    type BlockSize = U16;
+}
+impl<'a> ParBlocksSizeUser for KuznyechikDecryptBackend<'a> {
+    type ParBlocksSize = U1;
+}
+impl<'a> BlockBackend for KuznyechikDecryptBackend<'a> {
+    fn proc_block(&mut self, mut block: InOut<'_, '_, Block<Self>>) {
+        self.0.decrypt_block(block.get_out());
+    }
+}
+
+impl BlockDecrypt for KuznyechikWrapper {
+    fn decrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        let mut backend = KuznyechikDecryptBackend(&self.0);
+        f.call(&mut backend);
+    }
+}
+
+struct CamelliaWrapper(camellia::Camellia256);
+
+impl KeySizeUser for CamelliaWrapper {
+    type KeySize = U32;
+}
+
+impl KeyInit for CamelliaWrapper {
+    fn new(key: &Key<Self>) -> Self {
+        CamelliaWrapper(camellia::Camellia256::new(key))
+    }
+}
+
+impl BlockSizeUser for CamelliaWrapper {
+    type BlockSize = U16;
+}
+
+impl BlockCipher for CamelliaWrapper {}
+
+struct CamelliaEncryptBackend<'a>(&'a camellia::Camellia256);
+
+impl<'a> BlockSizeUser for CamelliaEncryptBackend<'a> {
+    type BlockSize = U16;
+}
+impl<'a> ParBlocksSizeUser for CamelliaEncryptBackend<'a> {
+    type ParBlocksSize = U1;
+}
+impl<'a> BlockBackend for CamelliaEncryptBackend<'a> {
+    fn proc_block(&mut self, mut block: InOut<'_, '_, Block<Self>>) {
+        self.0.encrypt_block(block.get_out());
+    }
+}
+
+impl BlockEncrypt for CamelliaWrapper {
+    fn encrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        let mut backend = CamelliaEncryptBackend(&self.0);
+        f.call(&mut backend);
+    }
+}
+
+struct CamelliaDecryptBackend<'a>(&'a camellia::Camellia256);
+
+impl<'a> BlockSizeUser for CamelliaDecryptBackend<'a> {
+    type BlockSize = U16;
+}
+impl<'a> ParBlocksSizeUser for CamelliaDecryptBackend<'a> {
+    type ParBlocksSize = U1;
+}
+impl<'a> BlockBackend for CamelliaDecryptBackend<'a> {
+    fn proc_block(&mut self, mut block: InOut<'_, '_, Block<Self>>) {
+        self.0.decrypt_block(block.get_out());
+    }
+}
+
+impl BlockDecrypt for CamelliaWrapper {
+    fn decrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        let mut backend = CamelliaDecryptBackend(&self.0);
+        f.call(&mut backend);
+    }
+}
 
 // Type alias for the XTS cipher. We need a trait object or enum to handle different ciphers.
 // For simplicity in this "try-all" approach, we'll define an enum.
@@ -16,13 +187,13 @@ pub enum SupportedCipher {
     SerpentAes(Xts128<Serpent>, Xts128<Aes256>),
     TwofishSerpent(Xts128<Twofish>, Xts128<Serpent>),
     SerpentTwofishAes(Xts128<Serpent>, Xts128<Twofish>, Xts128<Aes256>),
-    Camellia(Xts128<Camellia256>),
-    Kuznyechik(Xts128<Kuznyechik>),
-    CamelliaKuznyechik(Xts128<Camellia256>, Xts128<Kuznyechik>),
-    CamelliaSerpent(Xts128<Camellia256>, Xts128<Serpent>),
-    KuznyechikAes(Xts128<Kuznyechik>, Xts128<Aes256>),
-    KuznyechikSerpentCamellia(Xts128<Kuznyechik>, Xts128<Serpent>, Xts128<Camellia256>),
-    KuznyechikTwofish(Xts128<Kuznyechik>, Xts128<Twofish>),
+    Camellia(Xts128<CamelliaWrapper>),
+    Kuznyechik(Xts128<KuznyechikWrapper>),
+    CamelliaKuznyechik(Xts128<CamelliaWrapper>, Xts128<KuznyechikWrapper>),
+    CamelliaSerpent(Xts128<CamelliaWrapper>, Xts128<Serpent>),
+    KuznyechikAes(Xts128<KuznyechikWrapper>, Xts128<Aes256>),
+    KuznyechikSerpentCamellia(Xts128<KuznyechikWrapper>, Xts128<Serpent>, Xts128<CamelliaWrapper>),
+    KuznyechikTwofish(Xts128<KuznyechikWrapper>, Xts128<Twofish>),
 }
 
 impl SupportedCipher {
@@ -32,49 +203,49 @@ impl SupportedCipher {
             SupportedCipher::Serpent(xts) => xts.decrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::Twofish(xts) => xts.decrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::Camellia(xts) => xts.decrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::Kuznyechik(xts) => xts.decrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                xts_camellia.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_camellia.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                xts_camellia.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_camellia.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_aes.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikSerpentCamellia(xts_kuznyechik, xts_serpent, xts_camellia) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_camellia.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_twofish.decrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_kuznyechik.decrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
         }
     }
@@ -85,49 +256,49 @@ impl SupportedCipher {
             SupportedCipher::Serpent(xts) => xts.encrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::Twofish(xts) => xts.encrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::Camellia(xts) => xts.encrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::Kuznyechik(xts) => xts.encrypt_area(data, sector_size, sector_index, get_tweak_default),
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                xts_kuznyechik.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_camellia.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_kuznyechik.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_camellia.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_kuznyechik.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_aes.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikSerpentCamellia(xts_kuznyechik, xts_serpent, xts_camellia) => {
-                xts_camellia.encrypt_area(data, sector_size, sector_index, get_tweak_default);
-                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_kuznyechik.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_serpent.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_camellia.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
                 xts_kuznyechik.encrypt_area(data, sector_size, sector_index, get_tweak_default);
+                xts_twofish.encrypt_area(data, sector_size, sector_index, get_tweak_default);
             },
         }
     }
@@ -152,6 +323,7 @@ impl fmt::Display for VolumeError {
 
 pub struct VeracryptContext {
     cipher: SupportedCipher,
+    sector_size: u32,
 }
 
 // Send is required for Mutex.
@@ -181,19 +353,19 @@ impl VeracryptContext {
         // Try Serpent-Twofish-AES
         if let Ok(ctx) = Self::try_cipher_serpent_twofish_aes(header_key, encrypted_header) { return Ok(ctx); }
         // Try Camellia
-        // if let Ok(ctx) = Self::try_cipher_camellia(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_camellia(header_key, encrypted_header) { return Ok(ctx); }
         // Try Kuznyechik
-        // if let Ok(ctx) = Self::try_cipher_kuznyechik(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_kuznyechik(header_key, encrypted_header) { return Ok(ctx); }
         // Try Camellia-Kuznyechik
-        // if let Ok(ctx) = Self::try_cipher_camellia_kuznyechik(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_camellia_kuznyechik(header_key, encrypted_header) { return Ok(ctx); }
         // Try Camellia-Serpent
-        // if let Ok(ctx) = Self::try_cipher_camellia_serpent(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_camellia_serpent(header_key, encrypted_header) { return Ok(ctx); }
         // Try Kuznyechik-AES
-        // if let Ok(ctx) = Self::try_cipher_kuznyechik_aes(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_kuznyechik_aes(header_key, encrypted_header) { return Ok(ctx); }
         // Try Kuznyechik-Serpent-Camellia
-        // if let Ok(ctx) = Self::try_cipher_kuznyechik_serpent_camellia(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_kuznyechik_serpent_camellia(header_key, encrypted_header) { return Ok(ctx); }
         // Try Kuznyechik-Twofish
-        // if let Ok(ctx) = Self::try_cipher_kuznyechik_twofish(header_key, encrypted_header) { return Ok(ctx); }
+        if let Ok(ctx) = Self::try_cipher_kuznyechik_twofish(header_key, encrypted_header) { return Ok(ctx); }
         
         Err(VolumeError::InvalidPassword)
     }
@@ -209,13 +381,15 @@ impl VeracryptContext {
         decrypted.copy_from_slice(encrypted_header);
         xts.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        log::info!("AES Decrypted (first 4): {:02X?}", &decrypted[0..4]);
+
+        if let Ok(sector_size) = validate_header(&decrypted) {
              // Found it!
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk1 = &decrypted[master_key_offset..master_key_offset+32];
              let mk2 = &decrypted[master_key_offset+32..master_key_offset+64];
              let vol_xts = Xts128::new(Aes256::new(mk1.into()), Aes256::new(mk2.into()));
-             return Ok(VeracryptContext { cipher: SupportedCipher::Aes(vol_xts) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::Aes(vol_xts), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -231,12 +405,12 @@ impl VeracryptContext {
         decrypted.copy_from_slice(encrypted_header);
         xts.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
-             let master_key_offset = 256 - 64;
+        if let Ok(sector_size) = validate_header(&decrypted) {
+             let master_key_offset = 192;
              let mk1 = &decrypted[master_key_offset..master_key_offset+32];
              let mk2 = &decrypted[master_key_offset+32..master_key_offset+64];
              let vol_xts = Xts128::new(Serpent::new_from_slice(mk1).expect("Invalid key"), Serpent::new_from_slice(mk2).expect("Invalid key"));
-             return Ok(VeracryptContext { cipher: SupportedCipher::Serpent(vol_xts) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::Serpent(vol_xts), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -252,12 +426,12 @@ impl VeracryptContext {
         decrypted.copy_from_slice(encrypted_header);
         xts.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
-             let master_key_offset = 256 - 64;
+        if let Ok(sector_size) = validate_header(&decrypted) {
+             let master_key_offset = 192;
              let mk1 = &decrypted[master_key_offset..master_key_offset+32];
              let mk2 = &decrypted[master_key_offset+32..master_key_offset+64];
              let vol_xts = Xts128::new(Twofish::new(mk1.into()), Twofish::new(mk2.into()));
-             return Ok(VeracryptContext { cipher: SupportedCipher::Twofish(vol_xts) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::Twofish(vol_xts), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -275,12 +449,12 @@ impl VeracryptContext {
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
-        // Decrypt: AES then Twofish
-        xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Twofish -> AES
         xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
-             let master_key_offset = 256 - 64; // Standard offset
+        if let Ok(sector_size) = validate_header(&decrypted) {
+             let master_key_offset = 192; // Standard offset
              // For cascades, master keys are concatenated? 
              // AES key (64) + Twofish key (64) = 128 bytes
              let mk_aes = &decrypted[master_key_offset..master_key_offset+64];
@@ -289,7 +463,7 @@ impl VeracryptContext {
              let vol_xts_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
              let vol_xts_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::AesTwofish(vol_xts_aes, vol_xts_twofish) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::AesTwofish(vol_xts_aes, vol_xts_twofish), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -308,14 +482,14 @@ impl VeracryptContext {
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: AES -> Twofish -> Serpent
-        xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
-        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Serpent -> Twofish -> AES
         xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with AES-Twofish-Serpent");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              // AES (64) + Twofish (64) + Serpent (64) = 192 bytes
              let mk_aes = &decrypted[master_key_offset..master_key_offset+64];
              let mk_twofish = &decrypted[master_key_offset+64..master_key_offset+128];
@@ -325,7 +499,7 @@ impl VeracryptContext {
              let vol_xts_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
              let vol_xts_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).expect("Invalid key"), Serpent::new_from_slice(&mk_serpent[32..64]).expect("Invalid key"));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::AesTwofishSerpent(vol_xts_aes, vol_xts_twofish, vol_xts_serpent) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::AesTwofishSerpent(vol_xts_aes, vol_xts_twofish, vol_xts_serpent), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -340,20 +514,20 @@ impl VeracryptContext {
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Serpent -> AES
-        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: AES -> Serpent
         xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Serpent-AES");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_serpent = &decrypted[master_key_offset..master_key_offset+64];
              let mk_aes = &decrypted[master_key_offset+64..master_key_offset+128];
              
              let vol_xts_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).expect("Invalid key"), Serpent::new_from_slice(&mk_serpent[32..64]).expect("Invalid key"));
              let vol_xts_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::SerpentAes(vol_xts_serpent, vol_xts_aes) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::SerpentAes(vol_xts_serpent, vol_xts_aes), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -368,20 +542,20 @@ impl VeracryptContext {
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Twofish -> Serpent
-        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Serpent -> Twofish
         xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Twofish-Serpent");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_twofish = &decrypted[master_key_offset..master_key_offset+64];
              let mk_serpent = &decrypted[master_key_offset+64..master_key_offset+128];
              
              let vol_xts_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
              let vol_xts_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).expect("Invalid key"), Serpent::new_from_slice(&mk_serpent[32..64]).expect("Invalid key"));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::TwofishSerpent(vol_xts_twofish, vol_xts_serpent) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::TwofishSerpent(vol_xts_twofish, vol_xts_serpent), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -397,14 +571,14 @@ impl VeracryptContext {
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Serpent -> Twofish -> AES
-        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
-        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: AES -> Twofish -> Serpent
         xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Serpent-Twofish-AES");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_serpent = &decrypted[master_key_offset..master_key_offset+64];
              let mk_twofish = &decrypted[master_key_offset+64..master_key_offset+128];
              let mk_aes = &decrypted[master_key_offset+128..master_key_offset+192];
@@ -413,7 +587,7 @@ impl VeracryptContext {
              let vol_xts_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
              let vol_xts_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::SerpentTwofishAes(vol_xts_serpent, vol_xts_twofish, vol_xts_aes) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::SerpentTwofishAes(vol_xts_serpent, vol_xts_twofish, vol_xts_aes), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -422,18 +596,18 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts = Xts128::new(Camellia256::new(key_1.into()), Camellia256::new(key_2.into()));
+        let xts = Xts128::new(CamelliaWrapper::new(key_1.into()), CamelliaWrapper::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         xts.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Camellia");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk = &decrypted[master_key_offset..master_key_offset+64];
-             let vol_xts = Xts128::new(Camellia256::new(mk[0..32].into()), Camellia256::new(mk[32..64].into()));
-             return Ok(VeracryptContext { cipher: SupportedCipher::Camellia(vol_xts) });
+             let vol_xts = Xts128::new(CamelliaWrapper::new(mk[0..32].into()), CamelliaWrapper::new(mk[32..64].into()));
+             return Ok(VeracryptContext { cipher: SupportedCipher::Camellia(vol_xts), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -442,18 +616,18 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts = Xts128::new(Kuznyechik::new(key_1.into()), Kuznyechik::new(key_2.into()));
+        let xts = Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         xts.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Kuznyechik");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk = &decrypted[master_key_offset..master_key_offset+64];
-             let vol_xts = Xts128::new(Kuznyechik::new(mk[0..32].into()), Kuznyechik::new(mk[32..64].into()));
-             return Ok(VeracryptContext { cipher: SupportedCipher::Kuznyechik(vol_xts) });
+             let vol_xts = Xts128::new(KuznyechikWrapper::new(mk[0..32].into()), KuznyechikWrapper::new(mk[32..64].into()));
+             return Ok(VeracryptContext { cipher: SupportedCipher::Kuznyechik(vol_xts), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -462,26 +636,26 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts_camellia = Xts128::new(Camellia256::new(key_1.into()), Camellia256::new(key_2.into()));
-        let xts_kuznyechik = Xts128::new(Kuznyechik::new(key_1.into()), Kuznyechik::new(key_2.into()));
+        let xts_camellia = Xts128::new(CamelliaWrapper::new(key_1.into()), CamelliaWrapper::new(key_2.into()));
+        let xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Camellia -> Kuznyechik
-        xts_camellia.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Kuznyechik -> Camellia
         xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_camellia.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Camellia-Kuznyechik");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_camellia = &decrypted[master_key_offset..master_key_offset+64];
              let mk_kuznyechik = &decrypted[master_key_offset+64..master_key_offset+128];
              
-             let vol_xts_camellia = Xts128::new(Camellia256::new(mk_camellia[0..32].into()), Camellia256::new(mk_camellia[32..64].into()));
-             let vol_xts_kuznyechik = Xts128::new(Kuznyechik::new(mk_kuznyechik[0..32].into()), Kuznyechik::new(mk_kuznyechik[32..64].into()));
+             let vol_xts_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
+             let vol_xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::CamelliaKuznyechik(vol_xts_camellia, vol_xts_kuznyechik) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::CamelliaKuznyechik(vol_xts_camellia, vol_xts_kuznyechik), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -490,26 +664,26 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts_camellia = Xts128::new(Camellia256::new(key_1.into()), Camellia256::new(key_2.into()));
+        let xts_camellia = Xts128::new(CamelliaWrapper::new(key_1.into()), CamelliaWrapper::new(key_2.into()));
         let xts_serpent = Xts128::new(Serpent::new_from_slice(key_1).expect("Invalid key"), Serpent::new_from_slice(key_2).expect("Invalid key"));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Camellia -> Serpent
-        xts_camellia.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Serpent -> Camellia
         xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_camellia.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Camellia-Serpent");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_camellia = &decrypted[master_key_offset..master_key_offset+64];
              let mk_serpent = &decrypted[master_key_offset+64..master_key_offset+128];
              
-             let vol_xts_camellia = Xts128::new(Camellia256::new(mk_camellia[0..32].into()), Camellia256::new(mk_camellia[32..64].into()));
+             let vol_xts_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
              let vol_xts_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).expect("Invalid key"), Serpent::new_from_slice(&mk_serpent[32..64]).expect("Invalid key"));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::CamelliaSerpent(vol_xts_camellia, vol_xts_serpent) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::CamelliaSerpent(vol_xts_camellia, vol_xts_serpent), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -518,26 +692,26 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts_kuznyechik = Xts128::new(Kuznyechik::new(key_1.into()), Kuznyechik::new(key_2.into()));
+        let xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()));
         let xts_aes = Xts128::new(Aes256::new(key_1.into()), Aes256::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Kuznyechik -> AES
-        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: AES -> Kuznyechik
         xts_aes.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Kuznyechik-AES");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_kuznyechik = &decrypted[master_key_offset..master_key_offset+64];
              let mk_aes = &decrypted[master_key_offset+64..master_key_offset+128];
              
-             let vol_xts_kuznyechik = Xts128::new(Kuznyechik::new(mk_kuznyechik[0..32].into()), Kuznyechik::new(mk_kuznyechik[32..64].into()));
+             let vol_xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
              let vol_xts_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikAes(vol_xts_kuznyechik, vol_xts_aes) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikAes(vol_xts_kuznyechik, vol_xts_aes), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -546,30 +720,30 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts_kuznyechik = Xts128::new(Kuznyechik::new(key_1.into()), Kuznyechik::new(key_2.into()));
+        let xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()));
         let xts_serpent = Xts128::new(Serpent::new_from_slice(key_1).expect("Invalid key"), Serpent::new_from_slice(key_2).expect("Invalid key"));
-        let xts_camellia = Xts128::new(Camellia256::new(key_1.into()), Camellia256::new(key_2.into()));
+        let xts_camellia = Xts128::new(CamelliaWrapper::new(key_1.into()), CamelliaWrapper::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Kuznyechik -> Serpent -> Camellia
-        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
-        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Camellia -> Serpent -> Kuznyechik
         xts_camellia.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_serpent.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Kuznyechik-Serpent-Camellia");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_kuznyechik = &decrypted[master_key_offset..master_key_offset+64];
              let mk_serpent = &decrypted[master_key_offset+64..master_key_offset+128];
              let mk_camellia = &decrypted[master_key_offset+128..master_key_offset+192];
              
-             let vol_xts_kuznyechik = Xts128::new(Kuznyechik::new(mk_kuznyechik[0..32].into()), Kuznyechik::new(mk_kuznyechik[32..64].into()));
+             let vol_xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
              let vol_xts_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).expect("Invalid key"), Serpent::new_from_slice(&mk_serpent[32..64]).expect("Invalid key"));
-             let vol_xts_camellia = Xts128::new(Camellia256::new(mk_camellia[0..32].into()), Camellia256::new(mk_camellia[32..64].into()));
+             let vol_xts_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikSerpentCamellia(vol_xts_kuznyechik, vol_xts_serpent, vol_xts_camellia) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikSerpentCamellia(vol_xts_kuznyechik, vol_xts_serpent, vol_xts_camellia), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
@@ -578,32 +752,32 @@ impl VeracryptContext {
         let key_1 = &header_key[0..32];
         let key_2 = &header_key[32..64];
         
-        let xts_kuznyechik = Xts128::new(Kuznyechik::new(key_1.into()), Kuznyechik::new(key_2.into()));
+        let xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()));
         let xts_twofish = Xts128::new(Twofish::new(key_1.into()), Twofish::new(key_2.into()));
         
         let mut decrypted = [0u8; 448];
         decrypted.copy_from_slice(encrypted_header);
         
-        // Decrypt: Kuznyechik -> Twofish
-        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        // Decrypt: Twofish -> Kuznyechik
         xts_twofish.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
+        xts_kuznyechik.decrypt_area(&mut decrypted, 512, 0, get_tweak_default);
 
-        if &decrypted[0..4] == b"VERA" {
+        if let Ok(sector_size) = validate_header(&decrypted) {
              log::info!("Found volume with Kuznyechik-Twofish");
-             let master_key_offset = 256 - 64;
+             let master_key_offset = 192;
              let mk_kuznyechik = &decrypted[master_key_offset..master_key_offset+64];
              let mk_twofish = &decrypted[master_key_offset+64..master_key_offset+128];
              
-             let vol_xts_kuznyechik = Xts128::new(Kuznyechik::new(mk_kuznyechik[0..32].into()), Kuznyechik::new(mk_kuznyechik[32..64].into()));
+             let vol_xts_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
              let vol_xts_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
              
-             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikTwofish(vol_xts_kuznyechik, vol_xts_twofish) });
+             return Ok(VeracryptContext { cipher: SupportedCipher::KuznyechikTwofish(vol_xts_kuznyechik, vol_xts_twofish), sector_size });
         }
         Err(VolumeError::InvalidPassword)
     }
 
     pub fn decrypt_sector(&self, sector_index: u64, data: &mut [u8]) {
-        let sector_size = 512;
+        let sector_size = self.sector_size as usize;
         let chunks = data.chunks_mut(sector_size);
         for (i, chunk) in chunks.enumerate() {
             if chunk.len() == sector_size {
@@ -614,7 +788,7 @@ impl VeracryptContext {
     }
 
     pub fn encrypt_sector(&self, sector_index: u64, data: &mut [u8]) {
-        let sector_size = 512;
+        let sector_size = self.sector_size as usize;
         let chunks = data.chunks_mut(sector_size);
         for (i, chunk) in chunks.enumerate() {
             if chunk.len() == sector_size {
@@ -637,6 +811,9 @@ pub fn create_context(password: &[u8], header: &[u8], pim: i32) -> Result<i64, V
     
     let header_bytes = header;
     if header_bytes.len() < 512 { return Err(VolumeError::InvalidHeader); }
+    
+    log::info!("Header bytes (first 16): {:02X?}", &header_bytes[0..16]);
+
     let salt = &header_bytes[..64];
     let encrypted_header = &header_bytes[64..512];
     
@@ -687,20 +864,20 @@ pub fn create_context(password: &[u8], header: &[u8], pim: i32) -> Result<i64, V
 }
 
 fn register_context(context: VeracryptContext) -> Result<i64, VolumeError> {
-    let mut handle_lock = NEXT_HANDLE.lock().unwrap();
+    let mut handle_lock = NEXT_HANDLE.lock().map_err(|_| VolumeError::CryptoError("Lock poisoned".to_string()))?;
     let handle = *handle_lock;
     *handle_lock += 1;
     
-    let mut contexts_lock = CONTEXTS.lock().unwrap();
+    let mut contexts_lock = CONTEXTS.lock().map_err(|_| VolumeError::CryptoError("Lock poisoned".to_string()))?;
     contexts_lock.insert(handle, context);
     
     Ok(handle)
 }
 
 pub fn decrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeError> {
-    let contexts_lock = CONTEXTS.lock().unwrap();
+    let contexts_lock = CONTEXTS.lock().map_err(|_| VolumeError::CryptoError("Lock poisoned".to_string()))?;
     if let Some(context) = contexts_lock.get(&handle) {
-        let start_sector = offset / 512;
+        let start_sector = offset / (context.sector_size as u64);
         context.decrypt_sector(start_sector, data);
         Ok(())
     } else {
@@ -709,9 +886,9 @@ pub fn decrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeEr
 }
 
 pub fn encrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeError> {
-    let contexts_lock = CONTEXTS.lock().unwrap();
+    let contexts_lock = CONTEXTS.lock().map_err(|_| VolumeError::CryptoError("Lock poisoned".to_string()))?;
     if let Some(context) = contexts_lock.get(&handle) {
-        let start_sector = offset / 512;
+        let start_sector = offset / (context.sector_size as u64);
         context.encrypt_sector(start_sector, data);
         Ok(())
     } else {
@@ -720,6 +897,7 @@ pub fn encrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeEr
 }
 
 pub fn close_context(handle: i64) {
-    let mut contexts_lock = CONTEXTS.lock().unwrap();
-    contexts_lock.remove(&handle);
+    if let Ok(mut contexts_lock) = CONTEXTS.lock() {
+        contexts_lock.remove(&handle);
+    }
 }

@@ -42,6 +42,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var connectionJob: Job? = null
     private val connectionMutex = Mutex()
 
+    private val _logs = MutableSharedFlow<String>()
+    val logs = _logs.asSharedFlow()
+
     fun connectDevice(
         usbManager: UsbManager, // Kept for compatibility if needed, but libaums handles it
         password: ByteArray,
@@ -226,6 +229,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 rustHandle = null
                             }
                         }
+                    }
+
+                    // Fetch logs from Rust regardless of success/failure
+                    try {
+                        val nativeLogs = RustNative.getLogs()
+                        if (nativeLogs.isNotEmpty()) {
+                            val logStr = nativeLogs.joinToString("\n")
+                            _logs.emit(logStr)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
 
                     if (!success) {
