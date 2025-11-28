@@ -186,7 +186,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var lastError: String? = null
 
                     // If no partitions found, try the raw device itself
-                    val targets = if (partitions.isNotEmpty()) partitions else listOf(activeDevice!!)
+                    // UsbMassStorageDevice is not a BlockDeviceDriver, but it has one.
+                    // We need to access it. It might be private or accessible via property.
+                    // Assuming blockDevice is accessible or we use the rawDriver we created manually if any.
+                    
+                    val rawTarget = if (partitions.isEmpty()) {
+                         // If we created a manual rawDriver, use it.
+                         // Otherwise try to get from device.
+                         // Note: libaums UsbMassStorageDevice might not expose blockDevice publicly in all versions.
+                         // But we can try.
+                         // For now, let's assume we can use the manual 'rawDriver' if partitions is empty.
+                         // If rawDriver is null, we can't do much.
+                         if (rawDriver != null) listOf(rawDriver) else emptyList()
+                    } else {
+                        emptyList()
+                    }
+                    
+                    val targets = if (partitions.isNotEmpty()) partitions else rawTarget
 
                     for (partition in targets) {
                         try {

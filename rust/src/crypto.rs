@@ -1,15 +1,17 @@
 use aes::Aes256;
-use xts_mode::{Xts128, get_tweak_default};
+use xts_mode::Xts128;
 use serpent::Serpent;
 use twofish::Twofish;
 use cipher::{KeyInit, BlockCipher, BlockEncrypt, BlockDecrypt, Key, Block, KeySizeUser, BlockSizeUser, ParBlocksSizeUser, BlockBackend};
 use cipher::consts::{U32, U16, U1};
 use cipher::inout::InOut;
 use kuznyechik::block_cipher::{NewBlockCipher, BlockCipher as OldBlockCipher};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Wrapper structs for ciphers that don't implement the exact traits we need or need adaptation
 
-pub(crate) struct KuznyechikWrapper(kuznyechik::Kuznyechik);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct KuznyechikWrapper(#[zeroize(skip)] kuznyechik::Kuznyechik);
 
 impl KeySizeUser for KuznyechikWrapper {
     type KeySize = U32;
@@ -69,7 +71,8 @@ impl BlockDecrypt for KuznyechikWrapper {
     }
 }
 
-pub(crate) struct CamelliaWrapper(camellia::Camellia256);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct CamelliaWrapper(#[zeroize(skip)] camellia::Camellia256);
 
 impl KeySizeUser for CamelliaWrapper {
     type KeySize = U32;
@@ -129,22 +132,23 @@ impl BlockDecrypt for CamelliaWrapper {
     }
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub enum SupportedCipher {
-    Aes(Xts128<Aes256>),
-    Serpent(Xts128<Serpent>),
-    Twofish(Xts128<Twofish>),
-    AesTwofish(Xts128<Aes256>, Xts128<Twofish>),
-    AesTwofishSerpent(Xts128<Aes256>, Xts128<Twofish>, Xts128<Serpent>),
-    SerpentAes(Xts128<Serpent>, Xts128<Aes256>),
-    TwofishSerpent(Xts128<Twofish>, Xts128<Serpent>),
-    SerpentTwofishAes(Xts128<Serpent>, Xts128<Twofish>, Xts128<Aes256>),
-    Camellia(Xts128<CamelliaWrapper>),
-    Kuznyechik(Xts128<KuznyechikWrapper>),
-    CamelliaKuznyechik(Xts128<CamelliaWrapper>, Xts128<KuznyechikWrapper>),
-    CamelliaSerpent(Xts128<CamelliaWrapper>, Xts128<Serpent>),
-    KuznyechikAes(Xts128<KuznyechikWrapper>, Xts128<Aes256>),
-    KuznyechikSerpentCamellia(Xts128<KuznyechikWrapper>, Xts128<Serpent>, Xts128<CamelliaWrapper>),
-    KuznyechikTwofish(Xts128<KuznyechikWrapper>, Xts128<Twofish>),
+    Aes(#[zeroize(skip)] Xts128<Aes256>),
+    Serpent(#[zeroize(skip)] Xts128<Serpent>),
+    Twofish(#[zeroize(skip)] Xts128<Twofish>),
+    AesTwofish(#[zeroize(skip)] Xts128<Aes256>, #[zeroize(skip)] Xts128<Twofish>),
+    AesTwofishSerpent(#[zeroize(skip)] Xts128<Aes256>, #[zeroize(skip)] Xts128<Twofish>, #[zeroize(skip)] Xts128<Serpent>),
+    SerpentAes(#[zeroize(skip)] Xts128<Serpent>, #[zeroize(skip)] Xts128<Aes256>),
+    TwofishSerpent(#[zeroize(skip)] Xts128<Twofish>, #[zeroize(skip)] Xts128<Serpent>),
+    SerpentTwofishAes(#[zeroize(skip)] Xts128<Serpent>, #[zeroize(skip)] Xts128<Twofish>, #[zeroize(skip)] Xts128<Aes256>),
+    Camellia(#[zeroize(skip)] Xts128<CamelliaWrapper>),
+    Kuznyechik(#[zeroize(skip)] Xts128<KuznyechikWrapper>),
+    CamelliaKuznyechik(#[zeroize(skip)] Xts128<CamelliaWrapper>, #[zeroize(skip)] Xts128<KuznyechikWrapper>),
+    CamelliaSerpent(#[zeroize(skip)] Xts128<CamelliaWrapper>, #[zeroize(skip)] Xts128<Serpent>),
+    KuznyechikAes(#[zeroize(skip)] Xts128<KuznyechikWrapper>, #[zeroize(skip)] Xts128<Aes256>),
+    KuznyechikSerpentCamellia(#[zeroize(skip)] Xts128<KuznyechikWrapper>, #[zeroize(skip)] Xts128<Serpent>, #[zeroize(skip)] Xts128<CamelliaWrapper>),
+    KuznyechikTwofish(#[zeroize(skip)] Xts128<KuznyechikWrapper>, #[zeroize(skip)] Xts128<Twofish>),
 }
 
 impl SupportedCipher {

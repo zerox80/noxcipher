@@ -11,11 +11,10 @@ use twofish::Twofish;
 use blake2::Blake2s256;
 use streebog::Streebog512;
 use ripemd::Ripemd160;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 use std::sync::Mutex;
 use std::fmt;
 use cipher::{KeyInit, KeySizeUser, BlockCipher};
-use cipher::consts::{U32, U64};
 
 #[derive(Debug)]
 pub enum VolumeError {
@@ -42,8 +41,10 @@ impl fmt::Display for VolumeError {
     }
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Volume {
     header: VolumeHeader,
+    #[zeroize(skip)]
     cipher: SupportedCipher,
     partition_start_offset: u64,
     read_only: bool,
@@ -68,26 +69,26 @@ impl Volume {
         while offset < data.len() {
             let current_sector = sector_index + (offset / sector_size) as u64;
             
-            // Tweak calculation fix:
-            // VeraCrypt uses 0-based sector index relative to the start of the Data Area for standard volumes.
-            // The `sector_index` passed here is assumed to be relative to the start of the Data Area (VolumeDataOffset).
-            // So we just use it directly.
-            // For system encryption or partitions where we might need physical sector numbers, 
-            // `partition_start_offset` would be relevant, but for standard file containers or non-system partitions,
-            // the tweak is just the relative sector index.
+            // VeraCrypt XTS uses 512-byte data units regardless of sector size.
+            // For a 4096-byte sector, we process 8 units with sequential tweaks.
+            let units_per_sector = sector_size / 512;
             
-            // However, we must handle sector sizes > 512.
-            // VeraCrypt: unitNo = startUnitNo + (offset / ENCRYPTION_DATA_UNIT_SIZE)
-            // ENCRYPTION_DATA_UNIT_SIZE is 512 (XTS block size).
-            // So if sector size is 4096, we process 8 XTS units per sector.
-            // The `cipher.decrypt_area` handles the loop over units if we pass the correct start unit.
-            
-            // If `current_sector` is the sector index (0, 1, 2...),
-            // The start unit number is `current_sector * (sector_size / 512)`.
-            
-            let start_unit_no = current_sector * (self.header.sector_size as u64 / 512);
-            
-            self.cipher.decrypt_area(&mut data[offset..offset+sector_size], sector_size, start_unit_no);
+            for i in 0..units_per_sector {
+                let unit_offset = i * 512;
+                let unit_data_offset = offset + unit_offset;
+                
+                // Calculate unit number (tweak)
+                // unitNo = startUnitNo + i
+                // startUnitNo = current_sector * units_per_sector
+                let start_unit_no = current_sector * (units_per_sector as u64);
+                let unit_no = start_unit_no + i as u64;
+                
+                self.cipher.decrypt_area(
+                    &mut data[unit_data_offset..unit_data_offset+512], 
+                    512, 
+                    unit_no
+                );
+            }
             offset += sector_size;
         }
         Ok(())
@@ -106,9 +107,22 @@ impl Volume {
         let mut offset = 0;
         while offset < data.len() {
             let current_sector = sector_index + (offset / sector_size) as u64;
-            let start_unit_no = current_sector * (self.header.sector_size as u64 / 512);
             
-            self.cipher.encrypt_area(&mut data[offset..offset+sector_size], sector_size, start_unit_no);
+            let units_per_sector = sector_size / 512;
+            
+            for i in 0..units_per_sector {
+                let unit_offset = i * 512;
+                let unit_data_offset = offset + unit_offset;
+                
+                let start_unit_no = current_sector * (units_per_sector as u64);
+                let unit_no = start_unit_no + i as u64;
+                
+                self.cipher.encrypt_area(
+                    &mut data[unit_data_offset..unit_data_offset+512], 
+                    512, 
+                    unit_no
+                );
+            }
             offset += sector_size;
         }
         Ok(())
@@ -122,44 +136,62 @@ lazy_static::lazy_static! {
 }
 
 pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32) -> Result<i64, VolumeError> {
-    if header_bytes.len() < 512 { return Err(VolumeError::InvalidHeader(HeaderError::InvalidMagic)); }
+    // Try Standard Header at offset 0
+    if let Ok(handle) = try_header_at_offset(password, header_bytes, pim, 0) {
+        return Ok(handle);
+    }
     
-    let salt = &header_bytes[..64];
-    let encrypted_header = &header_bytes[64..512];
+    // Try Hidden Volume Header at offset 65536 (64KB)
+    // Ensure buffer is large enough (128KB expected from Kotlin)
+    if header_bytes.len() >= 65536 + 512 {
+        if let Ok(handle) = try_header_at_offset(password, header_bytes, pim, 65536) {
+            log::info!("Mounted Hidden Volume");
+            return Ok(handle);
+        }
+    }
     
-    // Iteration counts based on VeraCrypt source (Pkcs5Kdf.cpp)
-    // If PIM is 0 (default):
-    // SHA-512: 500,000
-    // SHA-256: 500,000
-    // Whirlpool: 500,000
-    // Streebog: 500,000
-    // Blake2s: 200,000 (Wait, VC uses 500,000 for all except Blake2s?)
-    // Let's verify Blake2s default. VC 1.26: Blake2s is 200,000? No, it's 500,000 for system encryption, but for standard?
-    // Checking VeraCrypt source Pkcs5Kdf.h:
-    // default_iterations = 500000;
-    // But for RIPEMD160 it is 655331 (Legacy)
-    
-    let iterations_default = if pim > 0 { 15000 + (pim as u32 * 1000) } else { 500_000 };
-    let iterations_ripemd = if pim > 0 { 15000 + (pim as u32 * 1000) } else { 655_331 };
-    let iterations_blake2s = if pim > 0 { 15000 + (pim as u32 * 1000) } else { 500_000 }; // VeraCrypt uses 500k for standard volumes
+    Err(VolumeError::InvalidPassword)
+}
 
-    let mut header_key = [0u8; 192]; // Max key size (Serpent-Twofish-AES = 192 bytes)
+fn try_header_at_offset(password: &[u8], full_buffer: &[u8], pim: i32, offset: usize) -> Result<i64, VolumeError> {
+    if full_buffer.len() < offset + 512 {
+        return Err(VolumeError::InvalidHeader(HeaderError::InvalidMagic));
+    }
+    
+    let header_slice = &full_buffer[offset..offset+512];
+    let salt = &header_slice[..64];
+    let encrypted_header = &header_slice[64..512];
 
-    // Helper to try all ciphers with a derived key
+    // Iteration counts to try
+    let mut iterations_list = Vec::new();
+    
+    if pim > 0 {
+        iterations_list.push(15000 + (pim as u32 * 1000));
+    } else {
+        // Default VeraCrypt
+        iterations_list.push(500_000); 
+        // Legacy TrueCrypt
+        iterations_list.push(1000); 
+        iterations_list.push(2000);
+    }
+    
+    // For Blake2s, default is 500,000 in VC, but maybe different for legacy? Blake2s wasn't in TC.
+    // We'll use the same list for all for simplicity, as trying extra iterations is cheap if they fail quickly.
+    // But we need to distinguish algorithms if we want to be precise.
+    // For now, we try the list for all KDFs.
+
+    let mut header_key = [0u8; 192]; 
+
+    // Helper to try all ciphers
     let try_unlock = |key: &[u8]| -> Result<Volume, VolumeError> {
         // Try AES
         if let Ok(v) = try_cipher::<Aes256>(key, encrypted_header, |k1, k2| SupportedCipher::Aes(Xts128::new(Aes256::new(k1.into()), Aes256::new(k2.into())))) { return Ok(v); }
-        
         // Try Serpent
         if let Ok(v) = try_cipher_serpent(key, encrypted_header) { return Ok(v); }
-        
         // Try Twofish
         if let Ok(v) = try_cipher::<Twofish>(key, encrypted_header, |k1, k2| SupportedCipher::Twofish(Xts128::new(Twofish::new(k1.into()), Twofish::new(k2.into())))) { return Ok(v); }
         
-        // Try Cascades...
-        // For brevity in this fix, I'll implement the most common ones and the structure for others.
-        // The previous implementation had them all, I should restore them.
-        
+        // Cascades
         if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header) { return Ok(v); }
         if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header) { return Ok(v); }
         if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header) { return Ok(v); }
@@ -176,37 +208,41 @@ pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32) -> Result<
         Err(VolumeError::InvalidPassword)
     };
 
-    // 1. SHA-512
-    log::info!("Trying SHA-512 KDF");
-    pbkdf2::<Hmac<Sha512>>(password, salt, iterations_default, &mut header_key).ok();
-    if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+    for &iter in &iterations_list {
+        // 1. SHA-512
+        pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut header_key).ok();
+        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
 
-    // 2. SHA-256
-    log::info!("Trying SHA-256 KDF");
-    pbkdf2::<Hmac<Sha256>>(password, salt, iterations_default, &mut header_key).ok();
-    if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        // 2. SHA-256
+        pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut header_key).ok();
+        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
 
-    // 3. Whirlpool
-    log::info!("Trying Whirlpool KDF");
-    pbkdf2::<Hmac<Whirlpool>>(password, salt, iterations_default, &mut header_key).ok();
-    if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        // 3. Whirlpool
+        pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut header_key).ok();
+        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
 
-    // 4. Blake2s
-    log::info!("Trying Blake2s KDF");
-    pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iterations_blake2s, &mut header_key).ok();
-    if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        // 4. Blake2s (Only if iter is default or pim based, legacy TC didn't have Blake2s)
+        // Blake2s default is 500,000.
+        if iter == 500_000 || pim > 0 {
+             pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
+             if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        }
 
-    // 5. Streebog
-    log::info!("Trying Streebog KDF");
-    pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iterations_default, &mut header_key).ok();
-    if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
-    
-    // 6. RIPEMD-160
-    log::info!("Trying RIPEMD-160 KDF");
-    pbkdf2::<Hmac<Ripemd160>>(password, salt, iterations_ripemd, &mut header_key).ok();
-    let res = try_unlock(&header_key);
-    header_key.zeroize(); // Zeroize key after use
-    if let Ok(vol) = res { return register_context(vol); }
+        // 5. Streebog
+        pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut header_key).ok();
+        if let Ok(vol) = try_unlock(&header_key) { return register_context(vol); }
+        
+        // 6. RIPEMD-160 (Different iterations)
+        // VC Default: 655331. TC Legacy: 1000 or 2000.
+        let ripemd_iter = if pim > 0 { 15000 + (pim as u32 * 1000) } else { 
+            if iter == 500_000 { 655_331 } else { iter } 
+        };
+        
+        pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut header_key).ok();
+        let res = try_unlock(&header_key);
+        header_key.zeroize(); 
+        if let Ok(vol) = res { return register_context(vol); }
+    }
 
     Err(VolumeError::InvalidPassword)
 }

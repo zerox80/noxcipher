@@ -46,14 +46,14 @@ pub struct VolumeHeader {
 
 impl VolumeHeader {
     pub fn deserialize(decrypted: &[u8]) -> Result<Self, HeaderError> {
-        if decrypted.len() != 448 {
-            // Should be 512 - 64 (salt) = 448
-            // But actually the decrypted buffer passed here is usually just the 448 bytes
+        if decrypted.len() < 448 {
+            // Should be at least 448 bytes (512 - 64 salt)
             return Err(HeaderError::InvalidMagic); 
         }
 
-        // Check Magic "VERA"
-        if &decrypted[0..4] != b"VERA" {
+        // Check Magic "VERA" or "TRUE"
+        let magic = &decrypted[0..4];
+        if magic != b"VERA" && magic != b"TRUE" {
             return Err(HeaderError::InvalidMagic);
         }
 
@@ -63,12 +63,19 @@ impl VolumeHeader {
         }
 
         // Check Header CRC (offset 252 - 64 = 188)
-        let header_crc_stored = BigEndian::read_u32(&decrypted[188..192]);
-        let header_crc_calc = crc32fast::hash(&decrypted[0..188]);
-        
-        if header_crc_stored != header_crc_calc {
-            return Err(HeaderError::InvalidCrc);
+        // Only for version >= 4
+        if version >= 4 {
+            let header_crc_stored = BigEndian::read_u32(&decrypted[188..192]);
+            let header_crc_calc = crc32fast::hash(&decrypted[0..188]);
+            
+            if header_crc_stored != header_crc_calc {
+                return Err(HeaderError::InvalidCrc);
+            }
         }
+        
+        // For older versions, we might rely on other checks or proceed.
+        // But we still need to read the stored CRC for the struct.
+        let header_crc_stored = BigEndian::read_u32(&decrypted[188..192]);
 
         let min_program_version = BigEndian::read_u16(&decrypted[6..8]);
         
