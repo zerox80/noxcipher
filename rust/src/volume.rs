@@ -12,7 +12,7 @@ use blake2::Blake2s256;
 use streebog::Streebog512;
 use ripemd::Ripemd160;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 use std::fmt;
 use cipher::{KeyInit, KeySizeUser, BlockCipher};
 
@@ -64,6 +64,10 @@ impl Volume {
     pub fn set_protection(&mut self, start: u64, end: u64) {
         self.protected_range_start = start;
         self.protected_range_end = end;
+    }
+
+    pub fn sector_size(&self) -> u32 {
+        self.header.sector_size
     }
 
     pub fn decrypt_sector(&self, sector_index: u64, data: &mut [u8]) -> Result<(), VolumeError> {
@@ -157,7 +161,7 @@ impl Volume {
 
 // Global map of contexts, keyed by a handle (ID).
 lazy_static::lazy_static! {
-    pub static ref CONTEXTS: Mutex<std::collections::HashMap<i64, Volume>> = Mutex::new(std::collections::HashMap::new());
+    pub static ref CONTEXTS: Mutex<std::collections::HashMap<i64, Arc<Volume>>> = Mutex::new(std::collections::HashMap::new());
     static ref NEXT_HANDLE: Mutex<i64> = Mutex::new(1);
 }
 
@@ -315,7 +319,7 @@ fn register_context(vol: Volume) -> Result<i64, VolumeError> {
     *handle_lock += 1;
     
     let mut contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    contexts_lock.insert(handle, vol);
+    contexts_lock.insert(handle, Arc::new(vol));
     
     Ok(handle)
 }

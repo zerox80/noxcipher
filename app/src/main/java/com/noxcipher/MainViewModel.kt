@@ -283,7 +283,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             
                             // 4. Mount Filesystem
                             val dummyEntry = PartitionTableEntry(0x0c, 0, 0)
-                            val fs = FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
+                            var fs: FileSystem? = null
+                            
+                            try {
+                                fs = FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
+                            } catch (e: Exception) {
+                                // libaums failed (likely not FAT32), try Rust FS (NTFS/exFAT)
+                                val volSize = try {
+                                    physicalDriver.blocks * physicalDriver.blockSize
+                                } catch (e: Exception) { 0L }
+
+                                val callback = object : NativeReadCallback {
+                                    override fun read(offset: Long, length: Int): ByteArray {
+                                        val buffer = ByteBuffer.allocate(length)
+                                        try {
+                                            physicalDriver.read(offset, buffer)
+                                            return buffer.array()
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                            return ByteArray(0)
+                                        }
+                                    }
+                                }
+
+                                val fsHandle = RustNative.mountFs(handle, callback, volSize)
+                                if (fsHandle > 0) {
+                                    fs = RustFileSystem(fsHandle, "NoxCipher Volume")
+                                } else {
+                                    throw e // Re-throw if Rust FS also fails
+                                }
+                            }
                             
                             activeFileSystem = fs
                             SessionManager.activeFileSystem = fs

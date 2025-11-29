@@ -8,6 +8,14 @@ use std::panic;
 mod volume;
 mod crypto;
 mod header;
+mod io_callback;
+mod filesystem;
+
+use filesystem::{SupportedFileSystem, DecryptedReader};
+use io_callback::CallbackReader;
+use ntfs::Ntfs;
+use exfat::ExFat;
+use jni::objects::JValue;
 
 use std::sync::Mutex;
 use lazy_static::lazy_static;
@@ -16,6 +24,8 @@ use jni::sys::jobjectArray;
 
 lazy_static! {
     static ref LOG_BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref FILESYSTEMS: Mutex<std::collections::HashMap<i64, SupportedFileSystem>> = Mutex::new(std::collections::HashMap::new());
+    static ref NEXT_FS_HANDLE: Mutex<i64> = Mutex::new(1);
 }
 
 struct InMemoryLogger;
@@ -295,4 +305,133 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
             -1
         }
     }
+}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
+    mut env: JNIEnv,
+    _class: JClass,
+    volume_handle: jlong,
+    callback_obj: jni::objects::JObject,
+    volume_size: jlong,
+) -> jlong {
+    let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let volume = {
+            let contexts = volume::CONTEXTS.lock().unwrap();
+            match contexts.get(&volume_handle) {
+                Some(v) => v.clone(),
+                None => return -1,
+            }
+        };
+
+        let jvm = env.get_java_vm().expect("Failed to get JavaVM");
+        let callback_global = env.new_global_ref(callback_obj).expect("Failed to create global ref");
+        let reader = CallbackReader::new(jvm, callback_global, volume_size as u64);
+        let decrypted_reader = DecryptedReader::new(reader, volume);
+
+        // Try NTFS
+        let reader_clone = decrypted_reader.clone();
+        if let Ok(ntfs) = Ntfs::new(reader_clone) {
+             log::info!("Mounted NTFS");
+             let mut lock = FILESYSTEMS.lock().unwrap();
+             let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
+             let handle = *handle_lock;
+             *handle_lock += 1;
+             lock.insert(handle, SupportedFileSystem::Ntfs(ntfs));
+             return handle;
+        }
+
+        // Try exFAT
+        let reader_clone2 = decrypted_reader.clone();
+        if let Ok(exfat) = ExFat::open(reader_clone2) {
+             log::info!("Mounted exFAT");
+             let mut lock = FILESYSTEMS.lock().unwrap();
+             let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
+             let handle = *handle_lock;
+             *handle_lock += 1;
+             lock.insert(handle, SupportedFileSystem::ExFat(exfat));
+             return handle;
+        }
+
+        log::warn!("Failed to detect NTFS or exFAT");
+        -1
+    })).unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    fs_handle: jlong,
+    path_obj: jni::objects::JString,
+) -> jobjectArray {
+    let path: String = env.get_string(&path_obj).map(|s| s.into()).unwrap_or_default();
+    
+    let files = {
+        let mut lock = FILESYSTEMS.lock().unwrap();
+        if let Some(fs) = lock.get_mut(&fs_handle) {
+            fs.list_files(&path).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let file_class = env.find_class("com/noxcipher/RustFile").expect("RustFile class not found");
+    let init_id = env.get_method_id(&file_class, "<init>", "(Ljava/lang/String;ZJ)V").expect("RustFile constructor not found");
+    
+    let array = env.new_object_array(files.len() as i32, &file_class, jni::objects::JObject::null()).expect("Failed to create array");
+
+    for (i, f) in files.iter().enumerate() {
+        let name_jstr = env.new_string(&f.name).unwrap();
+        let obj = env.new_object(&file_class, init_id, &[
+            JValue::Object(&name_jstr),
+            JValue::Bool(f.is_dir as u8),
+            JValue::Long(f.size as i64)
+        ]).unwrap();
+        env.set_object_array_element(&array, i as i32, obj).unwrap();
+    }
+    
+    array.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
+    mut env: JNIEnv,
+    _class: JClass,
+    fs_handle: jlong,
+    path_obj: jni::objects::JString,
+    offset: jlong,
+    buffer: jbyteArray,
+) -> jlong {
+    let path: String = env.get_string(&path_obj).map(|s| s.into()).unwrap_or_default();
+    
+    let mut lock = FILESYSTEMS.lock().unwrap();
+    if let Some(fs) = lock.get_mut(&fs_handle) {
+         let buf_obj = unsafe { JByteArray::from_raw(buffer) };
+         let len = env.get_array_length(&buf_obj).unwrap_or(0);
+         let mut buf = vec![0u8; len as usize];
+         
+         match fs.read_file(&path, offset as u64, &mut buf) {
+             Ok(bytes_read) => {
+                 let buf_ptr = buf.as_ptr() as *const i8;
+                 let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
+                 env.set_byte_array_region(&buf_obj, 0, buf_slice).unwrap();
+                 bytes_read as jlong
+             },
+             Err(_) => -1
+         }
+    } else {
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
+    _env: JNIEnv,
+    _class: JClass,
+    fs_handle: jlong,
+) {
+    let mut lock = FILESYSTEMS.lock().unwrap();
+    lock.remove(&fs_handle);
 }

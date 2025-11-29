@@ -1,0 +1,157 @@
+use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::Arc;
+use crate::volume::Volume;
+use crate::io_callback::CallbackReader;
+use ntfs::Ntfs;
+use exfat::ExFat;
+
+#[derive(Clone)]
+pub struct DecryptedReader {
+    inner: CallbackReader,
+    volume: Arc<Volume>,
+    sector_size: u64,
+    current_sector_index: u64,
+    sector_buffer: Vec<u8>,
+}
+
+impl DecryptedReader {
+    pub fn new(inner: CallbackReader, volume: Arc<Volume>) -> Self {
+        let sector_size = volume.sector_size() as u64;
+        Self {
+            inner,
+            volume,
+            sector_size,
+            current_sector_index: u64::MAX, // Invalid
+            sector_buffer: vec![0; sector_size as usize],
+        }
+    }
+
+    fn read_sector(&mut self, sector_index: u64) -> io::Result<()> {
+        if self.current_sector_index == sector_index {
+            return Ok(());
+        }
+
+        let offset = sector_index * self.sector_size;
+        self.inner.seek(SeekFrom::Start(offset))?;
+        
+        // Read encrypted data
+        self.inner.read_exact(&mut self.sector_buffer)?;
+        
+        // Decrypt in-place
+        self.volume.decrypt_sector(sector_index, &mut self.sector_buffer)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Decrypt error: {}", e)))?;
+            
+        self.current_sector_index = sector_index;
+        Ok(())
+    }
+}
+
+impl Read for DecryptedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let current_pos = self.inner.stream_position()?;
+        let sector_index = current_pos / self.sector_size;
+        let offset_in_sector = (current_pos % self.sector_size) as usize;
+        
+        self.read_sector(sector_index)?;
+        
+        let available = self.sector_size as usize - offset_in_sector;
+        let to_read = std::cmp::min(buf.len(), available);
+        
+        buf[..to_read].copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
+        
+        self.inner.seek(SeekFrom::Start(current_pos + to_read as u64))?;
+        
+        Ok(to_read)
+    }
+}
+
+impl Seek for DecryptedReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+pub enum SupportedFileSystem {
+    Ntfs(Ntfs<DecryptedReader>),
+    ExFat(ExFat<DecryptedReader>),
+}
+
+pub struct FileInfo {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+impl SupportedFileSystem {
+    pub fn list_files(&mut self, path: &str) -> io::Result<Vec<FileInfo>> {
+        match self {
+            SupportedFileSystem::Ntfs(ntfs) => {
+                let root = ntfs.root_directory();
+                // Traverse path... simplistic for now, just root
+                // TODO: Implement path traversal
+                let index = root.directory_index();
+                let mut results = Vec::new();
+                for entry in index.entries() {
+                    let entry = entry?;
+                    let name = entry.name().to_string_lossy();
+                    // Skip special files
+                    if name == "." || name == ".." { continue; }
+                    
+                    let is_dir = entry.is_directory();
+                    let size = entry.data_size();
+                    results.push(FileInfo { name: name.into_owned(), is_dir, size });
+                }
+                Ok(results)
+            },
+            SupportedFileSystem::ExFat(exfat) => {
+                let root = exfat.root_directory();
+                // TODO: Path traversal
+                let mut results = Vec::new();
+                for entry in root.entries() {
+                    let entry = entry?;
+                    let name = entry.name();
+                     if name == "." || name == ".." { continue; }
+                     results.push(FileInfo { name: name.to_string(), is_dir: entry.is_dir(), size: entry.len() });
+                }
+                Ok(results)
+            }
+        }
+    }
+
+    pub fn read_file(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            SupportedFileSystem::Ntfs(ntfs) => {
+                let root = ntfs.root_directory();
+                // TODO: Path traversal
+                // For now, assume file is in root
+                let index = root.directory_index();
+                let mut found_entry = None;
+                for entry in index.entries() {
+                    let entry = entry?;
+                    if entry.name().to_string_lossy() == path.trim_start_matches('/') {
+                        found_entry = Some(entry);
+                        break;
+                    }
+                }
+                
+                if let Some(entry) = found_entry {
+                    let file = entry.to_file()?;
+                    let mut data = file.data(ntfs, "");
+                    if let Some(mut attr) = data {
+                        attr.seek(SeekFrom::Start(offset))?;
+                        return attr.read(buf);
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+            },
+            SupportedFileSystem::ExFat(exfat) => {
+                // Placeholder
+                Ok(0)
+            }
+        }
+    }
+}

@@ -77,4 +77,37 @@ object RustNative {
      * @return The offset in bytes.
      */
     external fun getDataOffset(handle: Long): Long
+
+    /**
+     * Mounts the file system (NTFS/exFAT) via Rust.
+     * @param volumeHandle The handle to the initialized volume.
+     * @param callback The callback to read raw data.
+     * @param volumeSize The size of the volume in bytes.
+     * @return A handle to the file system, or -1 if failed.
+     */
+    external fun mountFs(volumeHandle: Long, callback: NativeReadCallback, volumeSize: Long): Long
+
+    /**
+     * Lists files in a directory.
+     * @param fsHandle The file system handle.
+     * @param path The path to list (e.g. "/").
+     * @return Array of RustFile objects.
+     */
+    external fun listFiles(fsHandle: Long, path: String): Array<RustFile>
+
+    /**
+     * Reads data from a file.
+     * @param fsHandle The file system handle.
+     * @param path The path of the file.
+     * @param offset The offset to read from.
+     * @param buffer The buffer to read into.
+     * @return The number of bytes read, or -1 if failed.
+     */
+    external fun readFile(fsHandle: Long, path: String, offset: Long, buffer: ByteArray): Long
+
+    /**
+     * Closes the file system.
+     * @param fsHandle The file system handle.
+     */
+    external fun closeFs(fsHandle: Long)
 }

@@ -30,6 +30,8 @@ blake2 = "0.10"
 streebog = "0.10"
 camellia = "0.1"
 kuznyechik = "0.4"
+ntfs = "0.4"
+exfat = "0.1"
 
 zeroize = { version = "1.6", features = ["derive"] }
 
