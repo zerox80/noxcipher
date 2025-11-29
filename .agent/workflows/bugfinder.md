@@ -4,4 +4,4 @@ description: Bugfinder
 
 Hey. Can you find 2 bugs in noxipher?
 
-Use Veracrypt-master as Reference / Sample to re-implement in Noxcipher
+Use Veracrypt directory as Reference / Sample to re-implement in Noxcipher
