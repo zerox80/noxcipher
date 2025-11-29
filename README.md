@@ -1,7 +1,7 @@
 # NoxCipher
 
-NoxCipher is an Android application designed to mount and explore VeraCrypt volumes via USB OTG. It utilizes a Rust backend for secure and efficient volume handling, communicating with the Android frontend through JNI.
+NoxCipher is an Android application for mounting and exploring VeraCrypt volumes via USB OTG. It features a secure Rust backend for cryptographic operations and a Kotlin frontend for the user interface.
 
-Key features include secure password management, file browsing capabilities, and robust error handling. The project demonstrates a hybrid architecture combining Kotlin for the UI and Rust for low level operations.
+Key capabilities include support for AES, Serpent, and Twofish algorithms, XTS mode, and hidden volumes. The app handles NTFS and exFAT file systems efficiently.
 
-To build, ensure you have the Android SDK and Rust toolchain installed. This version includes a mock volume implementation for testing purposes without physical devices.
+This project is licensed under the MIT License. See the LICENSE file for details.
