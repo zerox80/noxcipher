@@ -88,17 +88,40 @@ pub struct FileInfo {
 
 impl SupportedFileSystem {
     pub fn list_files(&mut self, path: &str) -> io::Result<Vec<FileInfo>> {
+        let path = path.trim_matches('/');
+        let components: Vec<&str> = if path.is_empty() {
+            Vec::new()
+        } else {
+            path.split('/').collect()
+        };
+
         match self {
             SupportedFileSystem::Ntfs(ntfs) => {
-                let root = ntfs.root_directory();
-                // Traverse path... simplistic for now, just root
-                // TODO: Implement path traversal
-                let index = root.directory_index();
+                let mut current_dir = ntfs.root_directory();
+                
+                for component in components {
+                    let index = current_dir.directory_index();
+                    let mut found = false;
+                    for entry in index.entries() {
+                        let entry = entry?;
+                        if entry.name().to_string_lossy() == component {
+                            if entry.is_directory() {
+                                current_dir = entry.to_directory()?;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found {
+                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                    }
+                }
+
+                let index = current_dir.directory_index();
                 let mut results = Vec::new();
                 for entry in index.entries() {
                     let entry = entry?;
                     let name = entry.name().to_string_lossy();
-                    // Skip special files
                     if name == "." || name == ".." { continue; }
                     
                     let is_dir = entry.is_directory();
@@ -108,10 +131,27 @@ impl SupportedFileSystem {
                 Ok(results)
             },
             SupportedFileSystem::ExFat(exfat) => {
-                let root = exfat.root_directory();
-                // TODO: Path traversal
+                let mut current_dir = exfat.root_directory();
+                
+                for component in components {
+                    let mut found = false;
+                    for entry in current_dir.entries() {
+                        let entry = entry?;
+                        if entry.name() == component {
+                            if entry.is_dir() {
+                                current_dir = entry.to_dir()?;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found {
+                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                    }
+                }
+
                 let mut results = Vec::new();
-                for entry in root.entries() {
+                for entry in current_dir.entries() {
                     let entry = entry?;
                     let name = entry.name();
                      if name == "." || name == ".." { continue; }
@@ -123,34 +163,80 @@ impl SupportedFileSystem {
     }
 
     pub fn read_file(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let path = path.trim_matches('/');
+        let components: Vec<&str> = if path.is_empty() {
+             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty path"));
+        } else {
+            path.split('/').collect()
+        };
+        
+        let (file_name, dir_components) = components.split_last().unwrap();
+
         match self {
             SupportedFileSystem::Ntfs(ntfs) => {
-                let root = ntfs.root_directory();
-                // TODO: Path traversal
-                // For now, assume file is in root
-                let index = root.directory_index();
-                let mut found_entry = None;
-                for entry in index.entries() {
-                    let entry = entry?;
-                    if entry.name().to_string_lossy() == path.trim_start_matches('/') {
-                        found_entry = Some(entry);
-                        break;
+                let mut current_dir = ntfs.root_directory();
+                for component in dir_components {
+                    let index = current_dir.directory_index();
+                    let mut found = false;
+                    for entry in index.entries() {
+                        let entry = entry?;
+                        if entry.name().to_string_lossy() == *component {
+                            if entry.is_directory() {
+                                current_dir = entry.to_directory()?;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found {
+                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
                     }
                 }
                 
-                if let Some(entry) = found_entry {
-                    let file = entry.to_file()?;
-                    let mut data = file.data(ntfs, "");
-                    if let Some(mut attr) = data {
-                        attr.seek(SeekFrom::Start(offset))?;
-                        return attr.read(buf);
+                let index = current_dir.directory_index();
+                for entry in index.entries() {
+                    let entry = entry?;
+                    if entry.name().to_string_lossy() == *file_name {
+                         let file = entry.to_file()?;
+                         let mut data = file.data(ntfs, "");
+                         if let Some(mut attr) = data {
+                             attr.seek(SeekFrom::Start(offset))?;
+                             return attr.read(buf);
+                         }
                     }
                 }
                 Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
             },
             SupportedFileSystem::ExFat(exfat) => {
-                // Placeholder
-                Ok(0)
+                let mut current_dir = exfat.root_directory();
+                for component in dir_components {
+                    let mut found = false;
+                    for entry in current_dir.entries() {
+                        let entry = entry?;
+                        if entry.name() == *component {
+                            if entry.is_dir() {
+                                current_dir = entry.to_dir()?;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found {
+                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                    }
+                }
+
+                for entry in current_dir.entries() {
+                    let entry = entry?;
+                    if entry.name() == *file_name {
+                        if !entry.is_dir() {
+                            let mut file = entry.to_file()?;
+                            file.seek(SeekFrom::Start(offset))?;
+                            return file.read(buf);
+                        }
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
             }
         }
     }
