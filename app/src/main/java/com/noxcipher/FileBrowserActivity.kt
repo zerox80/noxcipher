@@ -82,7 +82,7 @@ class FileBrowserActivity : AppCompatActivity() {
     private fun readFile(file: UsbFile) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Bug 4 Fix: Chunked reading to avoid OOM
+                // Chunked reading to avoid OOM
                 val maxReadSize = 1024 * 1024 // 1MB limit for display
                 val buffer = ByteBuffer.allocate(maxReadSize)
                 
@@ -99,7 +99,7 @@ class FileBrowserActivity : AppCompatActivity() {
                 
                 val isTruncated = file.length > maxReadSize
                 
-                // Bug 5 Fix: Better binary detection
+                // Better binary detection
                 val (text, truncated) = withContext(Dispatchers.Default) {
                     val isText = FileUtils.isText(content)
                     val displayText = if (isText) {

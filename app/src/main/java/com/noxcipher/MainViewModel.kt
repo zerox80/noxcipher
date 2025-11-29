@@ -240,22 +240,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             
                             // Get partition offset for XTS tweak
-                            val partitionOffset = if (physicalDriver is me.jahnen.libaums.core.partition.Partition) {
-                                // Partition usually has offset. But libaums Partition class might not expose it publicly as a field?
-                                // It extends BlockDeviceDriver.
-                                // Let's check if we can access it.
-                                // In libaums 0.10.0, Partition has `partitionTableEntry`.
-                                // PartitionTableEntry has `logicalBlockAddress`.
-                                // offset = lba * blockSize.
-                                try {
-                                    val entry = physicalDriver.partitionTableEntry
-                                    entry.logicalBlockAddress * physicalDriver.blockSize.toLong()
-                                } catch (e: Exception) {
-                                    0L
-                                }
-                            } else {
-                                0L
-                            }
+                            // For standard VeraCrypt volumes (even on partitions), the XTS tweak is relative to the start of the volume (partition).
+                            // So we should pass 0 as the partition offset.
+                            // The physical offset is only used for System Encryption (boot drive), which we don't support yet.
+                            val partitionOffset = 0L
                             
                             var handle: Long? = null
                             

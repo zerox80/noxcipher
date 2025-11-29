@@ -2,7 +2,7 @@ package com.noxcipher
 
 object FileUtils {
     fun isText(bytes: ByteArray): Boolean {
-        // Bug 4 Fix: Improved binary detection
+        // Improved binary detection
         if (bytes.isEmpty()) return true
         
         // Check for common binary headers (magic numbers)
@@ -29,7 +29,7 @@ object FileUtils {
     private val HEX_CHARS = "0123456789abcdef".toCharArray()
 
     fun toHex(bytes: ByteArray, sb: StringBuilder) {
-        // Bug 7 Fix: Optimized hex conversion
+        // Optimized hex conversion
         for (b in bytes) {
             val v = b.toInt() and 0xFF
             sb.append(HEX_CHARS[v ushr 4])

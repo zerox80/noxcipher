@@ -174,19 +174,19 @@ class MainActivity : AppCompatActivity() {
         val pimText = etPim.text.toString()
         val pim = if (pimText.isEmpty()) 0 else pimText.toIntOrNull() ?: 0
 
-        // Bug 2 Fix: Break loop after first successful connection attempt to avoid race condition
-        // Also Bug 3 Fix: Use manual byte conversion to avoid uncleared ByteBuffer
+        // Break loop after first successful connection attempt to avoid race condition
+        // Use manual byte conversion to avoid uncleared ByteBuffer
         for (device in deviceList.values) {
             log("Device: ${device.deviceName} (Vendor: ${device.vendorId}, Product: ${device.productId})")
             
             if (usbManager.hasPermission(device)) {
-                // Bug 1 Fix: Check if native lib is initialized
+                // Check if native lib is initialized
                 if (!RustNative.isInitialized) {
                     Toast.makeText(this, getString(R.string.toast_native_not_init), Toast.LENGTH_LONG).show()
                     return
                 }
 
-                // Bug 3 Fix: Manual conversion to avoid uncleared ByteBuffer
+                // Manual conversion to avoid uncleared ByteBuffer
                 val passwordBytes = ByteArray(passwordText.length)
                 for (i in passwordText.indices) {
                     passwordBytes[i] = passwordText[i].code.toByte()
