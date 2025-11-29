@@ -280,7 +280,7 @@ pub fn create_context(password: &[u8], header_bytes: &[u8], pim: i32, partition_
                          // Get start of protected area.
                          let start = hidden_vol.header.encrypted_area_start;
                          // Get end of protected area.
-                         let end = start + hidden_vol.header.encrypted_area_length;
+                         let end = start + hidden_vol.header.volume_data_size;
                          // Set protection on the outer volume.
                          vol.set_protection(start, end);
                      },
@@ -572,7 +572,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     // decrypt_area expects the full sector size to calculate tweaks internally? 
     // No, it takes `sector_size` to know when to increment tweak?
     // Here we pass 512 as sector size, and tweak 0.
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0); // Sector size 512 for header? Yes.
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0); // Sector size 512 for header? Yes.
 
     // Try to deserialize the decrypted header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
@@ -614,7 +614,7 @@ fn try_cipher_serpent(header_key: &[u8], encrypted_header: &[u8], partition_star
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
@@ -656,28 +656,29 @@ fn try_cipher_aes_twofish(header_key: &[u8], encrypted_header: &[u8], partition_
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Keys in master key area:
         // VeraCrypt AESTwofish: Key[0..32]->Twofish, Key[32..64]->AES.
-        // Wait, check EncryptionAlgorithm.cpp:
-        // AESTwofish::AESTwofish() { Ciphers.push_back(Twofish); Ciphers.push_back(AES); }
-        // SetKey: keyOffset=0 -> Twofish, keyOffset=32 -> AES.
-        // So Twofish uses 0..32, AES uses 32..64.
+        // Primary Keys: 0..64. Secondary Keys: 64..128.
         
         // Extract master keys.
-        let mk_twofish = &mk[0..64];
-        let mk_aes = &mk[64..128];
+        // Primary Keys
+        let mk_twofish_1 = &mk[0..32];
+        let mk_aes_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_twofish_2 = &mk[64..96];
+        let mk_aes_2 = &mk[96..128];
         
         // Create volume ciphers.
-        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
-        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish_1.into()), Twofish::new(mk_twofish_2.into()));
+        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -709,23 +710,28 @@ fn try_cipher_aes_twofish_serpent(header_key: &[u8], encrypted_header: &[u8], pa
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_serpent = &mk[0..64];
-        let mk_twofish = &mk[64..128];
-        let mk_aes = &mk[128..192];
+        // Primary Keys
+        let mk_serpent_1 = &mk[0..32];
+        let mk_twofish_1 = &mk[32..64];
+        let mk_aes_1 = &mk[64..96];
+        // Secondary Keys
+        let mk_serpent_2 = &mk[96..128];
+        let mk_twofish_2 = &mk[128..160];
+        let mk_aes_2 = &mk[160..192];
 
         // Create volume ciphers.
-        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
-        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish_1.into()), Twofish::new(mk_twofish_2.into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(96) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -753,21 +759,25 @@ fn try_cipher_serpent_aes(header_key: &[u8], encrypted_header: &[u8], partition_
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_aes = &mk[0..64];
-        let mk_serpent = &mk[64..128];
+        // Primary Keys
+        let mk_aes_1 = &mk[0..32];
+        let mk_serpent_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_aes_2 = &mk[64..96];
+        let mk_serpent_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
-        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
+        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -795,21 +805,25 @@ fn try_cipher_twofish_serpent(header_key: &[u8], encrypted_header: &[u8], partit
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_serpent = &mk[0..64];
-        let mk_twofish = &mk[64..128];
+        // Primary Keys
+        let mk_serpent_1 = &mk[0..32];
+        let mk_twofish_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_serpent_2 = &mk[64..96];
+        let mk_twofish_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish_1.into()), Twofish::new(mk_twofish_2.into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -840,23 +854,28 @@ fn try_cipher_serpent_twofish_aes(header_key: &[u8], encrypted_header: &[u8], pa
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_aes = &mk[0..64];
-        let mk_twofish = &mk[64..128];
-        let mk_serpent = &mk[128..192];
+        // Primary Keys
+        let mk_aes_1 = &mk[0..32];
+        let mk_twofish_1 = &mk[32..64];
+        let mk_serpent_1 = &mk[64..96];
+        // Secondary Keys
+        let mk_aes_2 = &mk[96..128];
+        let mk_twofish_2 = &mk[128..160];
+        let mk_serpent_2 = &mk[160..192];
 
         // Create volume ciphers.
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
-        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
-        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish_1.into()), Twofish::new(mk_twofish_2.into()));
+        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(96) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -900,21 +919,25 @@ fn try_cipher_camellia_kuznyechik(header_key: &[u8], encrypted_header: &[u8], pa
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_kuznyechik = &mk[0..64];
-        let mk_camellia = &mk[64..128];
+        // Primary Keys
+        let mk_kuznyechik_1 = &mk[0..32];
+        let mk_camellia_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_kuznyechik_2 = &mk[64..96];
+        let mk_camellia_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
-        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia_1.into()), CamelliaWrapper::new(mk_camellia_2.into()));
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik_1.into()), KuznyechikWrapper::new(mk_kuznyechik_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -942,21 +965,25 @@ fn try_cipher_camellia_serpent(header_key: &[u8], encrypted_header: &[u8], parti
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_serpent = &mk[0..64];
-        let mk_camellia = &mk[64..128];
+        // Primary Keys
+        let mk_serpent_1 = &mk[0..32];
+        let mk_camellia_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_serpent_2 = &mk[64..96];
+        let mk_camellia_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia_1.into()), CamelliaWrapper::new(mk_camellia_2.into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -984,21 +1011,25 @@ fn try_cipher_kuznyechik_aes(header_key: &[u8], encrypted_header: &[u8], partiti
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_aes = &mk[0..64];
-        let mk_kuznyechik = &mk[64..128];
+        // Primary Keys
+        let mk_aes_1 = &mk[0..32];
+        let mk_kuznyechik_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_aes_2 = &mk[64..96];
+        let mk_kuznyechik_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
-        let vol_aes = Xts128::new(Aes256::new(mk_aes[0..32].into()), Aes256::new(mk_aes[32..64].into()));
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik_1.into()), KuznyechikWrapper::new(mk_kuznyechik_2.into()));
+        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1030,23 +1061,28 @@ fn try_cipher_kuznyechik_serpent_camellia(header_key: &[u8], encrypted_header: &
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_camellia = &mk[0..64];
-        let mk_serpent = &mk[64..128];
-        let mk_kuznyechik = &mk[128..192];
+        // Primary Keys
+        let mk_camellia_1 = &mk[0..32];
+        let mk_serpent_1 = &mk[32..64];
+        let mk_kuznyechik_1 = &mk[64..96];
+        // Secondary Keys
+        let mk_camellia_2 = &mk[96..128];
+        let mk_serpent_2 = &mk[128..160];
+        let mk_kuznyechik_2 = &mk[160..192];
 
         // Create volume ciphers.
-        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
-        let vol_serpent = Xts128::new(Serpent::new_from_slice(&mk_serpent[0..32]).unwrap(), Serpent::new_from_slice(&mk_serpent[32..64]).unwrap());
-        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia[0..32].into()), CamelliaWrapper::new(mk_camellia[32..64].into()));
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik_1.into()), KuznyechikWrapper::new(mk_kuznyechik_2.into()));
+        let vol_serpent = Xts128::new(Serpent::new_from_slice(mk_serpent_1).unwrap(), Serpent::new_from_slice(mk_serpent_2).unwrap());
+        let vol_camellia = Xts128::new(CamelliaWrapper::new(mk_camellia_1.into()), CamelliaWrapper::new(mk_camellia_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(96) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1074,21 +1110,25 @@ fn try_cipher_kuznyechik_twofish(header_key: &[u8], encrypted_header: &[u8], par
     // Decrypt header.
     let mut decrypted = [0u8; 448];
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 512, 0);
+    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         let mk = &header.master_key_data;
         // Extract master keys.
-        let mk_twofish = &mk[0..64];
-        let mk_kuznyechik = &mk[64..128];
+        // Primary Keys
+        let mk_twofish_1 = &mk[0..32];
+        let mk_kuznyechik_1 = &mk[32..64];
+        // Secondary Keys
+        let mk_twofish_2 = &mk[64..96];
+        let mk_kuznyechik_2 = &mk[96..128];
 
         // Create volume ciphers.
-        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik[0..32].into()), KuznyechikWrapper::new(mk_kuznyechik[32..64].into()));
-        let vol_twofish = Xts128::new(Twofish::new(mk_twofish[0..32].into()), Twofish::new(mk_twofish[32..64].into()));
+        let vol_kuznyechik = Xts128::new(KuznyechikWrapper::new(mk_kuznyechik_1.into()), KuznyechikWrapper::new(mk_kuznyechik_2.into()));
+        let vol_twofish = Xts128::new(Twofish::new(mk_twofish_1.into()), Twofish::new(mk_twofish_2.into()));
         
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_key_vulnerable(64) {
             log::warn!("XTS Key Vulnerable");
         }
 
