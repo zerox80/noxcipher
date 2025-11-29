@@ -1,5 +1,5 @@
 package com.noxcipher
-
+// Import necessary Android and library classes.
 import android.app.Application
 import android.content.Context
 import android.hardware.usb.UsbManager
@@ -21,30 +21,43 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.nio.ByteBuffer
 
+// Sealed class representing the result of a connection attempt.
 sealed class ConnectionResult {
+    // Represents a successful connection.
     object Success : ConnectionResult()
+    // Represents a failed connection with an error message.
     data class Error(val message: String) : ConnectionResult()
 }
 
+// ViewModel for managing the main activity's data and business logic.
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
+    // Application context.
     private val context: Context = application.applicationContext
     
+    // The currently active file system (if mounted).
     var activeFileSystem: FileSystem? = null
         private set
     
+    // The currently connected USB device.
     private var activeDevice: UsbMassStorageDevice? = null
+    // Handle to the native Rust volume object.
     private var rustHandle: Long? = null
 
+    // SharedFlow to emit connection results to the UI.
     private val _connectionResult = MutableSharedFlow<ConnectionResult>()
     val connectionResult = _connectionResult.asSharedFlow()
 
+    // Job for the current connection attempt.
     private var connectionJob: Job? = null
+    // Mutex to ensure only one connection attempt runs at a time.
     private val connectionMutex = Mutex()
 
+    // SharedFlow to emit logs to the UI.
     private val _logs = MutableSharedFlow<String>()
     val logs = _logs.asSharedFlow()
 
+    // Function to connect to a USB device and mount the encrypted volume.
     fun connectDevice(
         usbManager: UsbManager, // Kept for compatibility if needed, but libaums handles it
         password: ByteArray,
@@ -52,47 +65,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         protectionPassword: ByteArray? = null,
         protectionPim: Int = 0
     ) {
+        // Cancel any existing connection job.
         connectionJob?.cancel()
         
+        // Launch a new coroutine on the IO dispatcher.
         connectionJob = viewModelScope.launch(Dispatchers.IO) {
+            // Acquire the mutex to ensure exclusive access.
             connectionMutex.withLock {
                 try {
+                    // Close any existing connection first.
                     closeConnection()
-
+                    
+                    // Get list of connected mass storage devices.
                     val devices = UsbMassStorageDevice.getMassStorageDevices(context)
                     if (devices.isEmpty()) {
+                        // Emit error if no devices found.
                         _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_mass_storage)))
                         return@withLock
                     }
-
-                    // Select first device
+                    
+                    // Select first device.
                     val device = devices[0]
+                    // Initialize the device.
                     device.init()
                     activeDevice = device
-
-                    // Try to get partitions from libaums
+                    
+                    // Try to get partitions from libaums.
                     // We cast to BlockDeviceDriver list because Partition implements it (usually)
                     // or we map it if needed. In 0.10.0 Partition implements BlockDeviceDriver.
                     var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
                     
                     var rawDriver: me.jahnen.libaums.core.driver.BlockDeviceDriver? = null
                     
-                    // Fallback: Manual GPT/MBR parsing if no partitions found
+                    // Fallback: Manual GPT/MBR parsing if no partitions found.
                     if (partitions.isEmpty()) {
                         val debugSb = StringBuilder()
                         
                         try {
-                            // blockDevice field is missing, try to create ScsiBlockDevice manually
-                            // 1. Get UsbCommunication
+                            // blockDevice field is missing, try to create ScsiBlockDevice manually.
+                            // 1. Get UsbCommunication via reflection.
                             val commField = UsbMassStorageDevice::class.java.getDeclaredField("usbCommunication")
                             commField.isAccessible = true
                             val comm = commField.get(device)
                             
                             if (comm != null) {
-                                // 2. Instantiate ScsiBlockDevice
+                                // 2. Instantiate ScsiBlockDevice via reflection.
                                 try {
                                     val scsiClass = Class.forName("me.jahnen.libaums.core.driver.scsi.ScsiBlockDevice")
-                                    // Try to find constructor that takes UsbCommunication
+                                    // Try to find constructor that takes UsbCommunication.
                                     val constructors = scsiClass.constructors
                                     var constructor = constructors.find { 
                                         it.parameterTypes.size == 1 && 
@@ -100,20 +120,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                                     
                                     if (constructor == null) {
-                                        // Try constructor with 2 args (UsbCommunication, listener/partitionTable?)
-                                        // Or maybe it takes the interface?
-                                        // Let's just try to find one that takes UsbCommunication as first arg
+                                        // Try constructor with more args if single-arg one not found.
                                          constructor = constructors.find { 
                                             it.parameterTypes.isNotEmpty() && 
                                             it.parameterTypes[0].isAssignableFrom(comm.javaClass) 
                                         }
                                     }
-
+                                    
                                     if (constructor != null) {
                                         val args = arrayOfNulls<Any>(constructor.parameterCount)
                                         args[0] = comm
                                         
-                                        // Fill other args
+                                        // Fill other args with defaults.
                                         val params = constructor.parameterTypes
                                         for (i in 1 until params.size) {
                                             if (params[i] == Byte::class.javaPrimitiveType || params[i] == Byte::class.java) {
@@ -127,6 +145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                             }
                                         }
                                         
+                                        // Create new instance and initialize it.
                                         rawDriver = constructor.newInstance(*args) as me.jahnen.libaums.core.driver.BlockDeviceDriver
                                         rawDriver.init()
                                     } else {
@@ -144,13 +163,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             
                             if (rawDriver != null) {
-                                // Try GPT first
+                                // Try parsing GPT first.
                                 var manualPartitions = com.noxcipher.util.PartitionUtils.parseGpt(rawDriver)
                                 if (manualPartitions.isEmpty()) {
-                                    // Try MBR
+                                    // Try parsing MBR if GPT fails.
                                     manualPartitions = com.noxcipher.util.PartitionUtils.parseMbr(rawDriver)
                                 }
-
+                                
+                                // If manual parsing succeeded, use those partitions.
                                 if (manualPartitions.isNotEmpty()) {
                                     partitions = manualPartitions
                                 }
@@ -159,7 +179,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             debugSb.append("\nManual driver creation fail: ${e.javaClass.simpleName} ${e.message}")
                             e.printStackTrace()
                         }
-
+                        
+                        // If still no partitions, log debug info and fail.
                         if (partitions.isEmpty()) {
                              val sb = StringBuilder()
                              sb.append("No partitions.")
@@ -167,6 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                              
                              if (rawDriver != null) {
                                  try {
+                                     // Read first sector for debugging.
                                      val debugBuf = ByteBuffer.allocate(512)
                                      rawDriver.read(0, debugBuf)
                                      val bytes = debugBuf.array()
@@ -184,11 +206,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     
-                    // Iterate over partitions and try to unlock
+                    // Iterate over partitions and try to unlock.
                     var success = false
                     var lastError: String? = null
 
-                    // If no partitions found, try the raw device itself
+                    // If no partitions found, try the raw device itself.
                     // UsbMassStorageDevice is not a BlockDeviceDriver, but it has one.
                     // We need to access it. It might be private or accessible via property.
                     // Assuming blockDevice is accessible or we use the rawDriver we created manually if any.
@@ -205,41 +227,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         emptyList<me.jahnen.libaums.core.driver.BlockDeviceDriver>()
                     }
                     
+                    // Determine targets to try: partitions or raw device.
                     val targets = if (partitions.isNotEmpty()) partitions else rawTarget
 
                     for (partition in targets) {
                         try {
                             val physicalDriver = partition
                             
-                            // We need to try 3 candidates:
+                            // We need to try 3 candidates for the volume header:
                             // 1. Primary Header (Offset 0)
                             // 2. Backup Header (Offset VolumeSize - 128KB)
-                            // 3. Hidden Volume Header (Offset VolumeSize - 64KB) - Wait, hidden is at 64KB before end?
+                            // 3. Hidden Volume Header (Offset VolumeSize - 64KB)
                             // VeraCrypt:
                             // Primary: 0
                             // Backup: VolumeSize - 131072 (128KB)
                             // Hidden: VolumeSize - 65536 (64KB)
                             
-                            // We need volume size.
+                            // Get volume size.
                             // libaums BlockDeviceDriver has `blocks` and `blockSize`.
-                            // But `blocks` might be 0 for some raw devices?
-                            // Let's try to get size.
+                            // But `blocks` might be 0 for some raw devices.
                             val volSize = try {
                                 physicalDriver.blocks.toLong() * physicalDriver.blockSize
                             } catch (e: Exception) {
                                 0L
                             }
                             
+                            // Prepare list of header candidates.
                             val candidates = mutableListOf<Pair<Long, String>>()
                             candidates.add(0L to "Primary")
-                            candidates.add(65536L to "Hidden")
+                            candidates.add(65536L to "Hidden") // This seems to be a check for hidden volume at start? Standard hidden volume header is at 64KB.
                             
                             if (volSize > 131072) {
                                 candidates.add((volSize - 131072) to "Backup")
                                 candidates.add((volSize - 65536) to "Backup Hidden")
                             }
                             
-                            // Get partition offset for XTS tweak
+                            // Get partition offset for XTS tweak.
                             // For standard VeraCrypt volumes (even on partitions), the XTS tweak is relative to the start of the volume (partition).
                             // So we should pass 0 as the partition offset.
                             // The physical offset is only used for System Encryption (boot drive), which we don't support yet.
@@ -247,52 +270,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             
                             var handle: Long? = null
                             
+                            // Try each candidate header.
                             for ((offset, type) in candidates) {
                                 try {
-                                    val headerBuffer = ByteBuffer.allocate(131072) // Read 128KB just in case, though header is 512 bytes + salt
+                                    // Read 128KB buffer to cover potential header locations.
+                                    val headerBuffer = ByteBuffer.allocate(131072) 
                                     // Actually we only need 512 bytes for the header itself, but salt is first 64.
                                     // Rust expects 512 bytes (salt + header).
-                                    // If we read at offset, we read 512 bytes.
-                                    
-                                    // Wait, for Backup Header, it's at the END.
-                                    // For Hidden, it's also near end.
                                     
                                     physicalDriver.read(offset, headerBuffer)
-                                    val headerBytes = headerBuffer.array() // Pass full 128KB buffer to allow Hidden Volume check
+                                    val headerBytes = headerBuffer.array() // Pass full buffer.
                                     
+                                    // Attempt to initialize volume with Rust native code.
                                     handle = RustNative.init(password, headerBytes, pim, partitionOffset, protectionPassword, protectionPim)
                                     if (handle != null && handle > 0) {
                                         lastError = "Success ($type)"
                                         break
                                     }
                                 } catch (e: Exception) {
-                                    // Failed this candidate
+                                    // Failed this candidate.
                                     lastError = "Failed $type: ${e.message}"
                                 }
                             }
 
+                            // If no valid handle obtained, continue to next partition.
                             if (handle == null || handle <= 0) {
                                 continue
                             }
                             
                             rustHandle = handle
+                            // Get data offset from Rust (where encrypted data starts).
                             val dataOffset = RustNative.getDataOffset(handle)
                             
-                            // 3. Create Veracrypt Wrapper
+                            // 3. Create Veracrypt Wrapper (BlockDeviceDriver).
                             val veracryptDriver = VeracryptBlockDevice(physicalDriver, handle, dataOffset)
                             
-                            // 4. Mount Filesystem
+                            // 4. Mount Filesystem.
+                            // Create a dummy partition entry for libaums.
                             val dummyEntry = PartitionTableEntry(0x0c, 0, 0)
                             var fs: FileSystem? = null
                             
                             try {
+                                // Try to create standard file system (FAT32) via libaums.
                                 fs = FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
                             } catch (e: Exception) {
-                                // libaums failed (likely not FAT32), try Rust FS (NTFS/exFAT)
+                                // libaums failed (likely not FAT32), try Rust FS (NTFS/exFAT).
                                 val volSize = try {
                                     physicalDriver.blocks * physicalDriver.blockSize
                                 } catch (e: Exception) { 0L }
 
+                                // Create callback for Rust to read from the device.
                                 val callback = object : NativeReadCallback {
                                     override fun read(offset: Long, length: Int): ByteArray {
                                         val buffer = ByteBuffer.allocate(length)
@@ -306,14 +333,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                                 }
 
+                                // Mount FS via Rust native code.
                                 val fsHandle = RustNative.mountFs(handle, callback, volSize)
                                 if (fsHandle > 0) {
+                                    // Wrap Rust FS handle in a Kotlin FileSystem object.
                                     fs = RustFileSystem(fsHandle, "NoxCipher Volume")
                                 } else {
-                                    throw e // Re-throw if Rust FS also fails
+                                    throw e // Re-throw if Rust FS also fails.
                                 }
                             }
                             
+                            // Set active file system and emit success.
                             activeFileSystem = fs
                             SessionManager.activeFileSystem = fs
                             _connectionResult.emit(ConnectionResult.Success)
@@ -323,7 +353,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             e.printStackTrace()
                             val msg = e.message ?: "Unknown error"
                             lastError = "Decrypt failed (Handle: $rustHandle): $msg"
-                            // Close handle if it was opened but FS failed
+                            // Close handle if it was opened but FS failed.
                             rustHandle?.let { 
                                 RustNative.close(it) 
                                 rustHandle = null
@@ -331,7 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    // Fetch logs from Rust regardless of success/failure
+                    // Fetch logs from Rust regardless of success/failure.
                     try {
                         val nativeLogs = RustNative.getLogs()
                         if (nativeLogs.isNotEmpty()) {
@@ -342,6 +372,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         e.printStackTrace()
                     }
 
+                    // If all attempts failed, emit error.
                     if (!success) {
                          _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_wrong_credentials, lastError ?: "No valid volume found")))
                          closeConnection()
@@ -351,12 +382,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_generic, e.message)))
                     closeConnection()
                 } finally {
+                    // Clear password from memory.
                     password.fill(0)
                 }
             }
         }
     }
     
+    // Function to list files in a directory.
     fun listFiles(dir: UsbFile): Array<UsbFile> {
         return try {
             dir.listFiles()
@@ -365,19 +398,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Function to close the connection and release resources.
     private fun closeConnection() {
         try {
             SessionManager.activeFileSystem = null
             activeFileSystem = null
+            // Close Rust volume handle.
             rustHandle?.let { RustNative.close(it) }
             rustHandle = null
+            // Close USB device.
             activeDevice?.close()
             activeDevice = null
         } catch (e: Exception) {
-            // Ignore
+            // Ignore errors during close.
         }
     }
 
+    // Called when ViewModel is cleared.
     override fun onCleared() {
         super.onCleared()
         closeConnection()

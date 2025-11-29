@@ -2,15 +2,20 @@ package com.noxcipher
 
 import android.util.Log
 
+// Singleton object to interface with the native Rust library.
 object RustNative {
+    // Flag to track if the native library was successfully initialized.
     var isInitialized = false
         private set
 
+    // Static initialization block to load the library.
     init {
         try {
             Log.d("RustNative", "Attempting to load library: rust_noxcipher")
+            // Load the shared library 'librust_noxcipher.so'.
             System.loadLibrary("rust_noxcipher")
             Log.d("RustNative", "Library loaded successfully. Initializing logger...")
+            // Initialize the native logger.
             initLogger()
             Log.d("RustNative", "Logger initialized.")
             isInitialized = true
@@ -23,6 +28,7 @@ object RustNative {
         }
     }
 
+    // Native method to initialize the Rust logger.
     external fun initLogger()
 
     /**

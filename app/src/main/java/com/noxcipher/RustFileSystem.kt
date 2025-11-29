@@ -5,16 +5,20 @@ import me.jahnen.libaums.core.fs.UsbFile
 import java.nio.ByteBuffer
 import java.io.IOException
 
+// Implementation of libaums FileSystem interface backed by Rust native code.
 class RustFileSystem(
     private val fsHandle: Long,
     private val label: String
 ) : FileSystem {
+    // Return root directory wrapper.
     override val rootDirectory: UsbFile
         get() = RustUsbFile(fsHandle, "/", true, 0, null)
 
+    // Return volume label.
     override val volumeLabel: String
         get() = label
 
+    // Capacity metrics (placeholders as we don't query them from Rust yet).
     override val capacity: Long = 0 
     override val occupiedSpace: Long = 0 
     override val freeSpace: Long = 0 
@@ -22,6 +26,7 @@ class RustFileSystem(
     override val type: String = "RustFS"
 }
 
+// Implementation of libaums UsbFile interface backed by Rust native code.
 class RustUsbFile(
     private val fsHandle: Long,
     private val path: String,
@@ -29,33 +34,48 @@ class RustUsbFile(
     private val size: Long,
     private val parent: UsbFile?
 ) : UsbFile {
+    // Search not implemented.
     override fun search(name: String): UsbFile? { return null } 
+    // Directory flag.
     override val isDirectory: Boolean = isDir
+    // File name derived from path.
     override val name: String = if (path == "/") "/" else path.substringAfterLast("/")
+    // Absolute path.
     override val absolutePath: String = path
+    // Parent directory.
     override val parent: UsbFile? = parent
+    // File size.
     override val length: Long = size
+    // Root check.
     override val isRoot: Boolean = path == "/"
 
+    // List files in this directory.
     override fun listFiles(): Array<UsbFile> {
+        // Call native listFiles.
         val files = RustNative.listFiles(fsHandle, path)
+        // Map RustFile objects to RustUsbFile wrappers.
         return files.map { 
             val childPath = if (path == "/") "/${it.name}" else "$path/${it.name}"
             RustUsbFile(fsHandle, childPath, it.isDir, it.size, this) 
         }.toTypedArray()
     }
 
+    // Read data from file.
     override fun read(offset: Long, destination: ByteBuffer) {
         val len = destination.remaining()
         if (len <= 0) return
         
+        // Allocate temporary buffer.
         val buffer = ByteArray(len)
+        // Call native readFile.
         val read = RustNative.readFile(fsHandle, path, offset, buffer)
+        // Copy read data to destination buffer.
         if (read > 0) {
             destination.put(buffer, 0, read.toInt())
         }
     }
     
+    // Write operations are not supported (Read-only).
     override fun write(offset: Long, source: ByteBuffer) {
         throw IOException("Read-only file system")
     }
