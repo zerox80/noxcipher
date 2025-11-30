@@ -122,10 +122,10 @@ impl Volume {
         // Get the sector size as usize.
         let sector_size = self.header.sector_size as usize;
         
-        // Ensure the data length is a multiple of the XTS data unit size (512 bytes).
-        if data.len() % 512 != 0 {
+        // Ensure the data length is a multiple of the sector size.
+        if data.len() % sector_size != 0 {
             // Return an error if not aligned.
-            return Err(VolumeError::CryptoError(format!("Data length {} is not a multiple of XTS data unit size 512", data.len())));
+            return Err(VolumeError::CryptoError(format!("Data length {} is not a multiple of sector size {}", data.len(), sector_size)));
         }
 
         // Initialize offset for processing data chunks.
@@ -203,10 +203,10 @@ impl Volume {
                  return Err(VolumeError::CryptoError("Write operation blocked by Hidden Volume Protection".to_string()));
             }
         }
-        // Ensure data length is a multiple of 512 bytes.
-        if data.len() % 512 != 0 {
+        // Ensure data length is a multiple of the sector size.
+        if data.len() % sector_size != 0 {
             // Return error if not aligned.
-            return Err(VolumeError::CryptoError(format!("Data length {} is not a multiple of XTS data unit size 512", data.len())));
+            return Err(VolumeError::CryptoError(format!("Data length {} is not a multiple of sector size {}", data.len(), sector_size)));
         }
 
         // Initialize offset.
@@ -481,6 +481,11 @@ pub fn decrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeEr
     let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
     // Look up the volume by handle.
     if let Some(context) = contexts_lock.get(&handle) {
+        // Check if offset is aligned to sector size.
+        if offset % (context.header.sector_size as u64) != 0 {
+             return Err(VolumeError::CryptoError("Offset not aligned to sector size".to_string()));
+        }
+
         // Calculate the starting sector index based on the offset.
         let start_sector = offset / (context.header.sector_size as u64);
         // Call the volume's decrypt_sector method.
@@ -497,6 +502,11 @@ pub fn encrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeEr
     let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
     // Look up the volume by handle.
     if let Some(context) = contexts_lock.get(&handle) {
+        // Check if offset is aligned to sector size.
+        if offset % (context.header.sector_size as u64) != 0 {
+             return Err(VolumeError::CryptoError("Offset not aligned to sector size".to_string()));
+        }
+
         // Calculate the starting sector index.
         let start_sector = offset / (context.header.sector_size as u64);
         // Call the volume's encrypt_sector method.
