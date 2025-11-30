@@ -593,7 +593,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         log::warn!("Failed to detect NTFS or exFAT");
         // Return -1 to indicate failure.
         -1
-    })).unwrap_or(-1) // If a panic occurred, return -1.
+    })).unwrap_or(-1); // If a panic occurred, return -1.
 }
 
 // Define a JNI function named Java_com_noxcipher_RustNative_listFiles.
