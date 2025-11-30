@@ -425,7 +425,7 @@ fn try_header_at_offset(
             partition_start_offset,
             hv_offset,
             |k1, k2| {
-                SupportedCipher::Aes(Xts128::new(Aes256::new(k1.into()), Aes256::new(k2.into())))
+                SupportedCipher::Aes(Xts128::new(AesWrapper::new(k1.into()), AesWrapper::new(k2.into())))
             },
         ) {
             return Ok(v);
@@ -443,8 +443,8 @@ fn try_header_at_offset(
             hv_offset,
             |k1, k2| {
                 SupportedCipher::Twofish(Xts128::new(
-                    Twofish::new(k1.into()),
-                    Twofish::new(k2.into()),
+                    TwofishWrapper::new(k1.into()),
+                    TwofishWrapper::new(k2.into()),
                 ))
             },
         ) {
@@ -786,10 +786,8 @@ fn try_cipher_serpent(
     let key_1 = &header_key[0..32];
     let key_2 = &header_key[32..64];
     // Create Serpent instances.
-    let cipher_1 = Serpent::new_from_slice(key_1)
-        .map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
-    let cipher_2 = Serpent::new_from_slice(key_2)
-        .map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
+    let cipher_1 = SerpentWrapper::new(key_1.into());
+    let cipher_2 = SerpentWrapper::new(key_2.into());
     // Create XTS instance.
     let xts = Xts128::new(cipher_1, cipher_2);
     // Wrap in SupportedCipher.
@@ -804,10 +802,8 @@ fn try_cipher_serpent(
     if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
         // Create volume cipher with master keys.
         let mk = &header.master_key_data;
-        let c1 = Serpent::new_from_slice(&mk[0..32])
-            .map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
-        let c2 = Serpent::new_from_slice(&mk[32..64])
-            .map_err(|_| VolumeError::CryptoError("Invalid key".into()))?;
+        let c1 = SerpentWrapper::new(mk[0..32].into());
+        let c2 = SerpentWrapper::new(mk[32..64].into());
         let vol_cipher = SupportedCipher::Serpent(Xts128::new(c1, c2));
 
         // Check vulnerability.
@@ -875,10 +871,10 @@ fn try_cipher_aes_twofish(
 
         // Create volume ciphers.
         let vol_twofish = Xts128::new(
-            Twofish::new(mk_twofish_1.into()),
-            Twofish::new(mk_twofish_2.into()),
+            TwofishWrapper::new(mk_twofish_1.into()),
+            TwofishWrapper::new(mk_twofish_2.into()),
         );
-        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
         if header.is_key_vulnerable(64) {
@@ -914,14 +910,14 @@ fn try_cipher_aes_twofish_serpent(
     let key_aes_2 = &header_key[160..192];
 
     // Create XTS instances.
-    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
     let cipher_twofish = Xts128::new(
-        Twofish::new(key_twofish_1.into()),
-        Twofish::new(key_twofish_2.into()),
+        TwofishWrapper::new(key_twofish_1.into()),
+        TwofishWrapper::new(key_twofish_2.into()),
     );
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
 
     // Wrap in SupportedCipher.
@@ -947,14 +943,14 @@ fn try_cipher_aes_twofish_serpent(
         let mk_aes_2 = &mk[160..192];
 
         // Create volume ciphers.
-        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
         let vol_twofish = Xts128::new(
-            Twofish::new(mk_twofish_1.into()),
-            Twofish::new(mk_twofish_2.into()),
+            TwofishWrapper::new(mk_twofish_1.into()),
+            TwofishWrapper::new(mk_twofish_2.into()),
         );
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
 
         // Check vulnerability.
@@ -989,10 +985,10 @@ fn try_cipher_serpent_aes(
 
     // Create XTS instances.
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
-    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
 
     // Wrap in SupportedCipher.
     let cipher_enum = SupportedCipher::SerpentAes(cipher_serpent, cipher_aes);
@@ -1015,10 +1011,10 @@ fn try_cipher_serpent_aes(
 
         // Create volume ciphers.
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
-        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
         if header.is_key_vulnerable(64) {
@@ -1052,12 +1048,12 @@ fn try_cipher_twofish_serpent(
 
     // Create XTS instances.
     let cipher_twofish = Xts128::new(
-        Twofish::new(key_twofish_1.into()),
-        Twofish::new(key_twofish_2.into()),
+        TwofishWrapper::new(key_twofish_1.into()),
+        TwofishWrapper::new(key_twofish_2.into()),
     );
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
 
     // Wrap in SupportedCipher.
@@ -1081,12 +1077,12 @@ fn try_cipher_twofish_serpent(
 
         // Create volume ciphers.
         let vol_twofish = Xts128::new(
-            Twofish::new(mk_twofish_1.into()),
-            Twofish::new(mk_twofish_2.into()),
+            TwofishWrapper::new(mk_twofish_1.into()),
+            TwofishWrapper::new(mk_twofish_2.into()),
         );
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
 
         // Check vulnerability.
@@ -1123,14 +1119,14 @@ fn try_cipher_serpent_twofish_aes(
 
     // Create XTS instances.
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
     let cipher_twofish = Xts128::new(
-        Twofish::new(key_twofish_1.into()),
-        Twofish::new(key_twofish_2.into()),
+        TwofishWrapper::new(key_twofish_1.into()),
+        TwofishWrapper::new(key_twofish_2.into()),
     );
-    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
 
     // Wrap in SupportedCipher.
     let cipher_enum =
@@ -1156,14 +1152,14 @@ fn try_cipher_serpent_twofish_aes(
 
         // Create volume ciphers.
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
         let vol_twofish = Xts128::new(
-            Twofish::new(mk_twofish_1.into()),
-            Twofish::new(mk_twofish_2.into()),
+            TwofishWrapper::new(mk_twofish_1.into()),
+            TwofishWrapper::new(mk_twofish_2.into()),
         );
-        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
         if header.is_key_vulnerable(96) {
@@ -1382,7 +1378,7 @@ fn try_cipher_kuznyechik_aes(
         KuznyechikWrapper::new(key_kuznyechik_1.into()),
         KuznyechikWrapper::new(key_kuznyechik_2.into()),
     );
-    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
 
     // Wrap in SupportedCipher.
     let cipher_enum = SupportedCipher::KuznyechikAes(cipher_kuznyechik, cipher_aes);
@@ -1408,7 +1404,7 @@ fn try_cipher_kuznyechik_aes(
             KuznyechikWrapper::new(mk_kuznyechik_1.into()),
             KuznyechikWrapper::new(mk_kuznyechik_2.into()),
         );
-        let vol_aes = Xts128::new(Aes256::new(mk_aes_1.into()), Aes256::new(mk_aes_2.into()));
+        let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
         if header.is_key_vulnerable(64) {
@@ -1449,8 +1445,8 @@ fn try_cipher_kuznyechik_serpent_camellia(
         KuznyechikWrapper::new(key_kuznyechik_2.into()),
     );
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
     let cipher_camellia = Xts128::new(
         CamelliaWrapper::new(key_camellia_1.into()),
@@ -1488,8 +1484,8 @@ fn try_cipher_kuznyechik_serpent_camellia(
             KuznyechikWrapper::new(mk_kuznyechik_2.into()),
         );
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
         let vol_camellia = Xts128::new(
             CamelliaWrapper::new(mk_camellia_1.into()),

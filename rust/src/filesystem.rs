@@ -155,6 +155,7 @@ impl SupportedFileSystem {
         match self {
             // Handle NTFS file system.
             SupportedFileSystem::Ntfs(reader) => {
+                reader.seek(SeekFrom::Start(0))?;
                 let ntfs = Ntfs::new(&mut *reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Start at the root directory.
@@ -309,6 +310,7 @@ impl SupportedFileSystem {
         match self {
             // Handle NTFS file system.
             SupportedFileSystem::Ntfs(reader) => {
+                reader.seek(SeekFrom::Start(0))?;
                 let ntfs = Ntfs::new(&mut *reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Start at root.

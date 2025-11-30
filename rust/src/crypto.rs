@@ -232,45 +232,140 @@ impl BlockDecrypt for CamelliaWrapper {
     }
 }
 
+// --- Wrappers for other ciphers to ensure ZeroizeOnDrop ---
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct AesWrapper(#[zeroize(skip)] Aes256);
+
+impl KeySizeUser for AesWrapper {
+    type KeySize = U32;
+}
+
+impl KeyInit for AesWrapper {
+    fn new(key: &Key<Self>) -> Self {
+        AesWrapper(Aes256::new(key))
+    }
+}
+
+impl BlockSizeUser for AesWrapper {
+    type BlockSize = U16;
+}
+
+impl BlockCipher for AesWrapper {}
+
+impl BlockEncrypt for AesWrapper {
+    fn encrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.encrypt_with_backend(f)
+    }
+}
+
+impl BlockDecrypt for AesWrapper {
+    fn decrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.decrypt_with_backend(f)
+    }
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct SerpentWrapper(#[zeroize(skip)] Serpent);
+
+impl KeySizeUser for SerpentWrapper {
+    type KeySize = U32;
+}
+
+impl KeyInit for SerpentWrapper {
+    fn new(key: &Key<Self>) -> Self {
+        SerpentWrapper(Serpent::new(key))
+    }
+}
+
+impl BlockSizeUser for SerpentWrapper {
+    type BlockSize = U16;
+}
+
+impl BlockCipher for SerpentWrapper {}
+
+impl BlockEncrypt for SerpentWrapper {
+    fn encrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.encrypt_with_backend(f)
+    }
+}
+
+impl BlockDecrypt for SerpentWrapper {
+    fn decrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.decrypt_with_backend(f)
+    }
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct TwofishWrapper(#[zeroize(skip)] Twofish);
+
+impl KeySizeUser for TwofishWrapper {
+    type KeySize = U32;
+}
+
+impl KeyInit for TwofishWrapper {
+    fn new(key: &Key<Self>) -> Self {
+        TwofishWrapper(Twofish::new(key))
+    }
+}
+
+impl BlockSizeUser for TwofishWrapper {
+    type BlockSize = U16;
+}
+
+impl BlockCipher for TwofishWrapper {}
+
+impl BlockEncrypt for TwofishWrapper {
+    fn encrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.encrypt_with_backend(f)
+    }
+}
+
+impl BlockDecrypt for TwofishWrapper {
+    fn decrypt_with_backend(&self, f: impl cipher::BlockClosure<BlockSize = Self::BlockSize>) {
+        self.0.decrypt_with_backend(f)
+    }
+}
+
 // Define an enum named SupportedCipher representing all supported cipher combinations.
 // Derive Zeroize and ZeroizeOnDrop to securely wipe key material.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub enum SupportedCipher {
     // Single cipher variants.
     // AES-256 in XTS mode.
-    Aes(#[zeroize(skip)] Xts128<Aes256>),
+    Aes(#[zeroize(skip)] Xts128<AesWrapper>),
     // Serpent in XTS mode.
-    Serpent(#[zeroize(skip)] Xts128<Serpent>),
+    Serpent(#[zeroize(skip)] Xts128<SerpentWrapper>),
     // Twofish in XTS mode.
-    Twofish(#[zeroize(skip)] Xts128<Twofish>),
+    Twofish(#[zeroize(skip)] Xts128<TwofishWrapper>),
 
     // Cascade cipher variants (Order matters: Outer -> Inner).
     // AES then Twofish cascade.
     AesTwofish(
-        #[zeroize(skip)] Xts128<Aes256>,
-        #[zeroize(skip)] Xts128<Twofish>,
+        #[zeroize(skip)] Xts128<AesWrapper>,
+        #[zeroize(skip)] Xts128<TwofishWrapper>,
     ),
     // AES then Twofish then Serpent cascade.
     AesTwofishSerpent(
-        #[zeroize(skip)] Xts128<Aes256>,
-        #[zeroize(skip)] Xts128<Twofish>,
-        #[zeroize(skip)] Xts128<Serpent>,
+        #[zeroize(skip)] Xts128<AesWrapper>,
+        #[zeroize(skip)] Xts128<TwofishWrapper>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
     ),
     // Serpent then AES cascade.
     SerpentAes(
-        #[zeroize(skip)] Xts128<Serpent>,
-        #[zeroize(skip)] Xts128<Aes256>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
+        #[zeroize(skip)] Xts128<AesWrapper>,
     ),
     // Twofish then Serpent cascade.
     TwofishSerpent(
-        #[zeroize(skip)] Xts128<Twofish>,
-        #[zeroize(skip)] Xts128<Serpent>,
+        #[zeroize(skip)] Xts128<TwofishWrapper>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
     ),
     // Serpent then Twofish then AES cascade.
     SerpentTwofishAes(
-        #[zeroize(skip)] Xts128<Serpent>,
-        #[zeroize(skip)] Xts128<Twofish>,
-        #[zeroize(skip)] Xts128<Aes256>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
+        #[zeroize(skip)] Xts128<TwofishWrapper>,
+        #[zeroize(skip)] Xts128<AesWrapper>,
     ),
 
     // Other single ciphers.
@@ -288,23 +383,23 @@ pub enum SupportedCipher {
     // Camellia then Serpent cascade.
     CamelliaSerpent(
         #[zeroize(skip)] Xts128<CamelliaWrapper>,
-        #[zeroize(skip)] Xts128<Serpent>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
     ),
     // Kuznyechik then AES cascade.
     KuznyechikAes(
         #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<Aes256>,
+        #[zeroize(skip)] Xts128<AesWrapper>,
     ),
     // Kuznyechik then Serpent then Camellia cascade.
     KuznyechikSerpentCamellia(
         #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<Serpent>,
+        #[zeroize(skip)] Xts128<SerpentWrapper>,
         #[zeroize(skip)] Xts128<CamelliaWrapper>,
     ),
     // Kuznyechik then Twofish cascade.
     KuznyechikTwofish(
         #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<Twofish>,
+        #[zeroize(skip)] Xts128<TwofishWrapper>,
     ),
 }
 
