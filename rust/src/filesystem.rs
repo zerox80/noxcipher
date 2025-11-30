@@ -62,7 +62,7 @@ impl DecryptedReader {
         // Decrypt the data in-place using the volume's decrypt_sector method.
         self.volume
             .decrypt_sector(sector_index, &mut self.sector_buffer)
-            .map_err(|e| io::Error::other(format!("Decrypt error: {}", e)))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Decrypt error: {}", e)))?;
 
         // Update the current sector index.
         self.current_sector_index = sector_index;
@@ -156,18 +156,18 @@ impl SupportedFileSystem {
             // Handle NTFS file system.
             SupportedFileSystem::Ntfs(reader) => {
                 let ntfs = Ntfs::new(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Start at the root directory.
                 let mut current_dir = ntfs
                     .root_directory(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
                 // Traverse the directory structure based on path components.
                 for component in components {
                     // Get the index of the current directory.
                     let index = current_dir
                         .directory_index(&mut *reader)
-                        .map_err(|e| io::Error::other(e.to_string()))?;
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     let mut found = false;
                     // Iterate through entries in the directory.
                     let mut entries = index.entries();
@@ -178,7 +178,7 @@ impl SupportedFileSystem {
                         if key.name().to_string_lossy() == component && key.is_directory() {
                             let id = entry.file_reference().file_record_number();
                             current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
-                                io::Error::other(e.to_string())
+                                io::Error::new(io::ErrorKind::Other, e.to_string())
                             })?;
                             found = true;
                             break;
@@ -193,7 +193,7 @@ impl SupportedFileSystem {
                 // We are now at the target directory. Get its index.
                 let index = current_dir
                     .directory_index(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let mut results = Vec::new();
                 // Iterate through entries to collect file info.
                 let mut entries = index.entries();
@@ -234,7 +234,7 @@ impl SupportedFileSystem {
                             if let exfat::directory::Item::Directory(dir) = item {
                                 if dir.name() == component {
                                     found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::other(e.to_string())
+                                        io::Error::new(io::ErrorKind::Other, e.to_string())
                                     })?);
                                     break;
                                 }
@@ -245,7 +245,7 @@ impl SupportedFileSystem {
                             if let exfat::directory::Item::Directory(dir) = item {
                                 if dir.name() == component {
                                     found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::other(e.to_string())
+                                        io::Error::new(io::ErrorKind::Other, e.to_string())
                                     })?);
                                     break;
                                 }
@@ -310,16 +310,16 @@ impl SupportedFileSystem {
             // Handle NTFS file system.
             SupportedFileSystem::Ntfs(reader) => {
                 let ntfs = Ntfs::new(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Start at root.
                 let mut current_dir = ntfs
                     .root_directory(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Traverse directories.
                 for component in dir_components {
                     let index = current_dir
                         .directory_index(&mut *reader)
-                        .map_err(|e| io::Error::other(e.to_string()))?;
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     let mut found = false;
                     let mut entries = index.entries();
                     while let Some(entry) = entries.next(&mut *reader) {
@@ -328,7 +328,7 @@ impl SupportedFileSystem {
                         if key.name().to_string_lossy() == *component && key.is_directory() {
                             let id = entry.file_reference().file_record_number();
                             current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
-                                io::Error::other(e.to_string())
+                                io::Error::new(io::ErrorKind::Other, e.to_string())
                             })?;
                             found = true;
                             break;
@@ -342,7 +342,7 @@ impl SupportedFileSystem {
                 // Look for the file in the final directory.
                 let index = current_dir
                     .directory_index(&mut *reader)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let mut entries = index.entries();
                 while let Some(entry) = entries.next(&mut *reader) {
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
@@ -353,20 +353,20 @@ impl SupportedFileSystem {
                         let id = entry.file_reference().file_record_number();
                         let file = ntfs
                             .file(&mut *reader, id)
-                            .map_err(|e| io::Error::other(e.to_string()))?;
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                         // Get data attribute (content).
                         let data = file.data(&mut *reader, "");
                         if let Some(attr_res) = data {
                             let attr_item = attr_res
-                                .map_err(|e| io::Error::other(e.to_string()))?;
-                            let attr = attr_item.to_attribute().map_err(|e| io::Error::other(e.to_string()))?;
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                            let attr = attr_item.to_attribute().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             let mut value = attr
                                 .value(&mut *reader)
-                                .map_err(|e: ntfs::NtfsError| io::Error::other(e.to_string()))?;
+                                .map_err(|e: ntfs::NtfsError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             // Seek to the requested offset.
-                            value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::other(e.to_string()))?;
+                            value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             // Read data into buffer.
-                            return value.read(&mut *reader, buf).map_err(|e| io::Error::other(e.to_string()));
+                            return value.read(&mut *reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
                         }
                     }
                 }
@@ -386,7 +386,7 @@ impl SupportedFileSystem {
                             if let exfat::directory::Item::Directory(dir) = item {
                                 if dir.name() == *component {
                                     found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::other(e.to_string())
+                                        io::Error::new(io::ErrorKind::Other, e.to_string())
                                     })?);
                                     break;
                                 }
@@ -397,7 +397,7 @@ impl SupportedFileSystem {
                             if let exfat::directory::Item::Directory(dir) = item {
                                 if dir.name() == *component {
                                     found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::other(e.to_string())
+                                        io::Error::new(io::ErrorKind::Other, e.to_string())
                                     })?);
                                     break;
                                 }
@@ -418,7 +418,7 @@ impl SupportedFileSystem {
                         if let exfat::directory::Item::File(file) = item {
                             if file.name() == *file_name {
                                 let reader_opt = file.open().map_err(|e| {
-                                    io::Error::other(e.to_string())
+                                    io::Error::new(io::ErrorKind::Other, e.to_string())
                                 })?;
                                 if let Some(mut reader) = reader_opt {
                                     reader.seek(SeekFrom::Start(offset))?;
@@ -434,7 +434,7 @@ impl SupportedFileSystem {
                         if let exfat::directory::Item::File(file) = item {
                             if file.name() == *file_name {
                                 let reader_opt = file.open().map_err(|e| {
-                                    io::Error::other(e.to_string())
+                                    io::Error::new(io::ErrorKind::Other, e.to_string())
                                 })?;
                                 if let Some(mut reader) = reader_opt {
                                     reader.seek(SeekFrom::Start(offset))?;

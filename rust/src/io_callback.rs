@@ -41,7 +41,7 @@ impl Read for CallbackReader {
 
         // Attach current thread to JVM.
         let mut env = self.jvm.attach_current_thread().map_err(|e| {
-            io::Error::other(format!("JNI attach failed: {}", e))
+            io::Error::new(io::ErrorKind::Other, format!("JNI attach failed: {}", e))
         })?;
 
         // Prepare arguments.
@@ -56,11 +56,11 @@ impl Read for CallbackReader {
                 "(JI)[B",
                 &[JValue::Long(offset), JValue::Int(len)],
             )
-            .map_err(|e| io::Error::other(format!("JNI call failed: {}", e)))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI call failed: {}", e)))?;
 
         // Get byte array from result.
         let byte_array = result.l().map_err(|e| {
-            io::Error::other(format!("JNI result error: {}", e))
+            io::Error::new(io::ErrorKind::Other, format!("JNI result error: {}", e))
         })?;
 
         // Check for null (EOF or error).
@@ -71,13 +71,14 @@ impl Read for CallbackReader {
         // Convert Java byte array to Rust Vec<u8>.
         let ba: jni::objects::JByteArray = byte_array.into();
         let bytes = env.convert_byte_array(&ba).map_err(|e| {
-            io::Error::other(format!("JNI array conversion failed: {}", e))
+            io::Error::new(io::ErrorKind::Other, format!("JNI array conversion failed: {}", e))
         })?;
 
         // Check if returned data fits in buffer.
         let read_len = bytes.len();
         if read_len > buf.len() {
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
                 "Java returned more bytes than requested",
             ));
         }
@@ -100,7 +101,8 @@ impl Seek for CallbackReader {
             SeekFrom::Start(p) => p,
             SeekFrom::End(p) => {
                 if self.volume_size == 0 {
-                    return Err(io::Error::other(
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
                         "Cannot seek from end: size unknown",
                     ));
                 }
