@@ -1,4 +1,5 @@
 // Import the ByteOrder trait and BigEndian struct from the byteorder crate.
+#![allow(unused_assignments)]
 // These are used to handle big-endian byte order conversions, which is common in cryptographic headers.
 use byteorder::{BigEndian, ByteOrder};
 // Import the fmt module from the standard library.
@@ -11,6 +12,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // Define an enumeration named HeaderError to represent possible errors during header parsing.
 // Derive Debug and Clone traits for easy printing and copying of error values.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum HeaderError {
     // Error variant indicating that the magic bytes ("VERA" or "TRUE") were not found in the header.
     InvalidMagic,
@@ -52,6 +54,8 @@ impl fmt::Display for HeaderError {
 // Derive Debug and Clone for utility purposes.
 // Derive Zeroize and ZeroizeOnDrop to ensure sensitive data is wiped from memory when the struct is dropped.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[allow(dead_code)]
+#[allow(unused_assignments)]
 pub struct VolumeHeader {
     // The version of the volume header (2 bytes).
     pub version: u16,
@@ -95,7 +99,7 @@ impl VolumeHeader {
         // A valid header must be at least 448 bytes (512 bytes total - 64 bytes salt).
         if decrypted.len() < 448 {
             // If the data is too short, return an InvalidMagic error.
-            return Err(HeaderError::InvalidMagic); 
+            return Err(HeaderError::InvalidMagic);
         }
 
         // Extract the first 4 bytes to check the magic signature.
@@ -110,8 +114,8 @@ impl VolumeHeader {
         let version = BigEndian::read_u16(&decrypted[4..6]);
         // Verify that the version is at least 1.
         if version < 1 {
-             // If the version is less than 1, return an UnsupportedVersion error.
-             return Err(HeaderError::UnsupportedVersion);
+            // If the version is less than 1, return an UnsupportedVersion error.
+            return Err(HeaderError::UnsupportedVersion);
         }
 
         // Check the Header CRC. The CRC check is only mandatory for version 4 and above.
@@ -122,26 +126,26 @@ impl VolumeHeader {
             // Calculate the CRC32 of the first 188 bytes of the decrypted header.
             // This covers the header fields up to the CRC itself.
             let header_crc_calc = crc32fast::hash(&decrypted[0..188]);
-            
+
             // Compare the stored CRC with the calculated CRC.
             if header_crc_stored != header_crc_calc {
                 // If they don't match, return an InvalidCrc error.
                 return Err(HeaderError::InvalidCrc);
             }
         }
-        
+
         // Read the stored CRC32 again (or for the first time if version < 4).
         // We need this value to populate the struct field.
         let header_crc_stored = BigEndian::read_u32(&decrypted[188..192]);
 
         // Read the minimum program version (2 bytes) from offset 6.
         let min_program_version = BigEndian::read_u16(&decrypted[6..8]);
-        
+
         // Check if the minimum program version is supported.
         // 0x011a corresponds to version 1.26.
         if min_program_version > 0x011a {
-             // If the required version is greater than supported, return UnsupportedProgramVersion error.
-             return Err(HeaderError::UnsupportedProgramVersion);
+            // If the required version is greater than supported, return UnsupportedProgramVersion error.
+            return Err(HeaderError::UnsupportedProgramVersion);
         }
 
         // Read the key area CRC32 (4 bytes) from offset 8.
@@ -171,7 +175,7 @@ impl VolumeHeader {
 
         // Validate that the sector size is within the valid range (512 to 4096) and is a multiple of 512.
         // VeraCrypt supports sector sizes: 512, 1024, 2048, 4096.
-        if sector_size < 512 || sector_size > 4096 || sector_size % 512 != 0 {
+        if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 {
             // If validation fails, return an InvalidSectorSize error.
             return Err(HeaderError::InvalidSectorSize);
         }
@@ -182,9 +186,9 @@ impl VolumeHeader {
         let key_area_crc_calc = crc32fast::hash(&decrypted[192..448]);
         // Compare the stored key area CRC with the calculated one.
         if key_area_crc32 != key_area_crc_calc {
-             // If they don't match, return an InvalidCrc error.
-             // This indicates potential corruption of the master keys.
-             return Err(HeaderError::InvalidCrc);
+            // If they don't match, return an InvalidCrc error.
+            // This indicates potential corruption of the master keys.
+            return Err(HeaderError::InvalidCrc);
         }
 
         // Initialize a 256-byte array for the master key data, filled with zeros.
@@ -216,13 +220,13 @@ impl VolumeHeader {
         // Ensure that the master key data is large enough to contain the full XTS key (2 * key_size).
         if key_size * 2 > self.master_key_data.len() {
             // If the key size is invalid for the buffer, return true (treat as vulnerable/error).
-            return true; 
+            return true;
         }
 
         // Extract the first half of the XTS key (Key1) as a slice.
         let key1 = &self.master_key_data[0..key_size];
         // Extract the second half of the XTS key (Key2) as a slice.
-        let key2 = &self.master_key_data[key_size..key_size*2];
+        let key2 = &self.master_key_data[key_size..key_size * 2];
 
         // Return true if Key1 is identical to Key2, indicating a vulnerability.
         // Otherwise, return false.

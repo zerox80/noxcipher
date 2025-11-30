@@ -7,9 +7,9 @@ use crate::volume::Volume;
 // Import CallbackReader from io_callback module.
 use crate::io_callback::CallbackReader;
 // Import NTFS implementation.
-use ntfs::Ntfs;
+use ntfs::{Ntfs, NtfsReadSeek};
 // Import ExFAT implementation.
-use exfat::ExFat;
+// use exfat::ExFat;
 
 // Struct representing a reader that decrypts data on the fly.
 #[derive(Clone)]
@@ -55,14 +55,15 @@ impl DecryptedReader {
         let offset = sector_index * self.sector_size;
         // Seek to the sector offset in the underlying reader.
         self.inner.seek(SeekFrom::Start(offset))?;
-        
+
         // Read encrypted data into the buffer.
         self.inner.read_exact(&mut self.sector_buffer)?;
-        
+
         // Decrypt the data in-place using the volume's decrypt_sector method.
-        self.volume.decrypt_sector(sector_index, &mut self.sector_buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Decrypt error: {}", e)))?;
-            
+        self.volume
+            .decrypt_sector(sector_index, &mut self.sector_buffer)
+            .map_err(|e| io::Error::other(format!("Decrypt error: {}", e)))?;
+
         // Update the current sector index.
         self.current_sector_index = sector_index;
         // Return success.
@@ -84,25 +85,27 @@ impl Read for DecryptedReader {
         let sector_index = current_pos / self.sector_size;
         // Calculate the offset within that sector.
         let offset_in_sector = (current_pos % self.sector_size) as usize;
-        
+
         // Ensure the correct sector is loaded and decrypted.
         self.read_sector(sector_index)?;
-        
+
         // Calculate how many bytes are available in the current sector from the current offset.
         let available = self.sector_size as usize - offset_in_sector;
         // Determine how many bytes to read (min of requested and available).
         let to_read = std::cmp::min(buf.len(), available);
-        
+
         // Copy the decrypted data to the output buffer.
-        buf[..to_read].copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
-        
+        buf[..to_read]
+            .copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
+
         // Advance the underlying reader's position.
         // Note: read_sector seeks to the start of the sector, so we need to restore/advance position.
         // Actually, read_sector seeks to 'offset'. After read_exact, position is at end of sector.
         // But we want to simulate a continuous stream.
         // We update the position to reflect the bytes "read".
-        self.inner.seek(SeekFrom::Start(current_pos + to_read as u64))?;
-        
+        self.inner
+            .seek(SeekFrom::Start(current_pos + to_read as u64))?;
+
         // Return the number of bytes read.
         Ok(to_read)
     }
@@ -119,9 +122,9 @@ impl Seek for DecryptedReader {
 // Enum representing supported file systems.
 pub enum SupportedFileSystem {
     // NTFS file system wrapper.
-    Ntfs(Ntfs<DecryptedReader>),
+    Ntfs(DecryptedReader),
     // ExFAT file system wrapper.
-    ExFat(ExFat<DecryptedReader>),
+    ExFat(Vec<exfat::directory::Item<DecryptedReader>>),
 }
 
 // Struct to hold information about a file or directory.
@@ -151,93 +154,138 @@ impl SupportedFileSystem {
 
         match self {
             // Handle NTFS file system.
-            SupportedFileSystem::Ntfs(ntfs) => {
+            SupportedFileSystem::Ntfs(reader) => {
+                let ntfs = Ntfs::new(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 // Start at the root directory.
-                let mut current_dir = ntfs.root_directory();
-                
+                let mut current_dir = ntfs
+                    .root_directory(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+
                 // Traverse the directory structure based on path components.
                 for component in components {
                     // Get the index of the current directory.
-                    let index = current_dir.directory_index();
+                    let index = current_dir
+                        .directory_index(&mut *reader)
+                        .map_err(|e| io::Error::other(e.to_string()))?;
                     let mut found = false;
                     // Iterate through entries in the directory.
-                    for entry in index.entries() {
-                        let entry = entry?;
+                    let mut entries = index.entries();
+                    while let Some(entry) = entries.next(&mut *reader) {
+                        let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
                         // Check if the entry name matches the current component.
-                        if entry.name().to_string_lossy() == component {
-                            // If it's a directory, descend into it.
-                            if entry.is_directory() {
-                                current_dir = entry.to_directory()?;
-                                found = true;
-                                break;
-                            }
+                        let key = entry.key().expect("entry has no key")?;
+                        if key.name().to_string_lossy() == component && key.is_directory() {
+                            let id = entry.file_reference().file_record_number();
+                            current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                io::Error::other(e.to_string())
+                            })?;
+                            found = true;
+                            break;
                         }
                     }
                     // If component not found, return NotFound error.
                     if !found {
-                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
                     }
                 }
 
                 // We are now at the target directory. Get its index.
-                let index = current_dir.directory_index();
+                let index = current_dir
+                    .directory_index(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 let mut results = Vec::new();
                 // Iterate through entries to collect file info.
-                for entry in index.entries() {
-                    let entry = entry?;
+                let mut entries = index.entries();
+                while let Some(entry) = entries.next(&mut *reader) {
+                    let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
+                    let key = entry.key().expect("entry has no key")?;
                     // Get the name of the entry.
-                    let name = entry.name().to_string_lossy();
+                    let name = key.name().to_string_lossy();
                     // Skip current and parent directory entries.
-                    if name == "." || name == ".." { continue; }
-                    
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+
                     // Determine if it's a directory.
-                    let is_dir = entry.is_directory();
+                    let is_dir = key.is_directory();
                     // Get the size of the entry.
-                    let size = entry.data_size();
+                    let size = key.data_size();
                     // Add to results.
-                    results.push(FileInfo { name: name.into_owned(), is_dir, size });
+                    results.push(FileInfo {
+                        name: name.to_string(),
+                        is_dir,
+                        size,
+                    });
                 }
                 // Return the list of files.
                 Ok(results)
-            },
+            }
             // Handle ExFAT file system.
-            SupportedFileSystem::ExFat(exfat) => {
-                // Start at the root directory.
-                let mut current_dir = exfat.root_directory();
-                
-                // Traverse the directory structure.
+            SupportedFileSystem::ExFat(root_items) => {
+                let mut loaded_dir: Vec<exfat::directory::Item<DecryptedReader>> = Vec::new();
+                let mut is_root = true;
+
                 for component in components {
-                    let mut found = false;
-                    // Iterate through entries in the current directory.
-                    for entry in current_dir.entries() {
-                        let entry = entry?;
-                        // Check if entry name matches component.
-                        if entry.name() == component {
-                            // If it's a directory, descend into it.
-                            if entry.is_dir() {
-                                current_dir = entry.to_dir()?;
-                                found = true;
-                                break;
+                    let mut found_dir_items = None;
+
+                    if is_root {
+                        for item in root_items.iter() {
+                            if let exfat::directory::Item::Directory(dir) = item {
+                                if dir.name() == component {
+                                    found_dir_items = Some(dir.open().map_err(|e| {
+                                        io::Error::other(e.to_string())
+                                    })?);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        for item in loaded_dir.iter() {
+                            if let exfat::directory::Item::Directory(dir) = item {
+                                if dir.name() == component {
+                                    found_dir_items = Some(dir.open().map_err(|e| {
+                                        io::Error::other(e.to_string())
+                                    })?);
+                                    break;
+                                }
                             }
                         }
                     }
-                    // If component not found, return NotFound error.
-                    if !found {
-                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+
+                    if let Some(items) = found_dir_items {
+                        loaded_dir = items;
+                        is_root = false;
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
                     }
                 }
 
-                // We are at the target directory. Collect entries.
                 let mut results = Vec::new();
-                for entry in current_dir.entries() {
-                    let entry = entry?;
-                    let name = entry.name();
-                    // Skip special entries if any (ExFAT usually doesn't have . and .. in iteration like NTFS/FAT might, but good to be safe or maybe not needed).
-                     if name == "." || name == ".." { continue; }
-                     // Add to results.
-                     results.push(FileInfo { name: name.to_string(), is_dir: entry.is_dir(), size: entry.len() });
+                let items_to_list = if is_root {
+                    root_items.iter()
+                } else {
+                    loaded_dir.iter()
+                };
+
+                for item in items_to_list {
+                    match item {
+                        exfat::directory::Item::Directory(dir) => {
+                            results.push(FileInfo {
+                                name: dir.name().to_string(),
+                                is_dir: true,
+                                size: 0,
+                            });
+                        }
+                        exfat::directory::Item::File(file) => {
+                            results.push(FileInfo {
+                                name: file.name().to_string(),
+                                is_dir: false,
+                                size: file.len(),
+                            });
+                        }
+                    }
                 }
-                // Return the list of files.
                 Ok(results)
             }
         }
@@ -249,98 +297,156 @@ impl SupportedFileSystem {
         let path = path.trim_matches('/');
         // Split path into components.
         let components: Vec<&str> = if path.is_empty() {
-             // Cannot read root as a file.
-             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty path"));
+            // Cannot read root as a file.
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty path"));
         } else {
             path.split('/').collect()
         };
-        
+
         // Separate the file name from the directory path components.
         let (file_name, dir_components) = components.split_last().unwrap();
 
         match self {
             // Handle NTFS file system.
-            SupportedFileSystem::Ntfs(ntfs) => {
+            SupportedFileSystem::Ntfs(reader) => {
+                let ntfs = Ntfs::new(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 // Start at root.
-                let mut current_dir = ntfs.root_directory();
+                let mut current_dir = ntfs
+                    .root_directory(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 // Traverse directories.
                 for component in dir_components {
-                    let index = current_dir.directory_index();
+                    let index = current_dir
+                        .directory_index(&mut *reader)
+                        .map_err(|e| io::Error::other(e.to_string()))?;
                     let mut found = false;
-                    for entry in index.entries() {
-                        let entry = entry?;
-                        if entry.name().to_string_lossy() == *component {
-                            if entry.is_directory() {
-                                current_dir = entry.to_directory()?;
-                                found = true;
-                                break;
-                            }
+                    let mut entries = index.entries();
+                    while let Some(entry) = entries.next(&mut *reader) {
+                        let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
+                        let key = entry.key().expect("entry has no key")?;
+                        if key.name().to_string_lossy() == *component && key.is_directory() {
+                            let id = entry.file_reference().file_record_number();
+                            current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                io::Error::other(e.to_string())
+                            })?;
+                            found = true;
+                            break;
                         }
                     }
                     if !found {
-                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
                     }
                 }
-                
+
                 // Look for the file in the final directory.
-                let index = current_dir.directory_index();
-                for entry in index.entries() {
-                    let entry = entry?;
+                let index = current_dir
+                    .directory_index(&mut *reader)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                let mut entries = index.entries();
+                while let Some(entry) = entries.next(&mut *reader) {
+                    let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
+                    let key = entry.key().expect("entry has no key")?;
                     // Check if entry name matches file name.
-                    if entry.name().to_string_lossy() == *file_name {
-                         // Convert entry to file.
-                         let file = entry.to_file()?;
-                         // Get data attribute (content).
-                         let mut data = file.data(ntfs, "");
-                         if let Some(mut attr) = data {
-                             // Seek to the requested offset.
-                             attr.seek(SeekFrom::Start(offset))?;
-                             // Read data into buffer.
-                             return attr.read(buf);
-                         }
+                    if key.name().to_string_lossy() == *file_name {
+                        // Convert entry to file.
+                        let id = entry.file_reference().file_record_number();
+                        let file = ntfs
+                            .file(&mut *reader, id)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        // Get data attribute (content).
+                        let data = file.data(&mut *reader, "");
+                        if let Some(attr_res) = data {
+                            let attr_item = attr_res
+                                .map_err(|e| io::Error::other(e.to_string()))?;
+                            let attr = attr_item.to_attribute().map_err(|e| io::Error::other(e.to_string()))?;
+                            let mut value = attr
+                                .value(&mut *reader)
+                                .map_err(|e: ntfs::NtfsError| io::Error::other(e.to_string()))?;
+                            // Seek to the requested offset.
+                            value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::other(e.to_string()))?;
+                            // Read data into buffer.
+                            return value.read(&mut *reader, buf).map_err(|e| io::Error::other(e.to_string()));
+                        }
                     }
                 }
                 // File not found.
                 Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
-            },
+            }
             // Handle ExFAT file system.
-            SupportedFileSystem::ExFat(exfat) => {
-                // Start at root.
-                let mut current_dir = exfat.root_directory();
-                // Traverse directories.
+            SupportedFileSystem::ExFat(root_items) => {
+                let mut loaded_dir: Vec<exfat::directory::Item<DecryptedReader>> = Vec::new();
+                let mut is_root = true;
+
                 for component in dir_components {
-                    let mut found = false;
-                    for entry in current_dir.entries() {
-                        let entry = entry?;
-                        if entry.name() == *component {
-                            if entry.is_dir() {
-                                current_dir = entry.to_dir()?;
-                                found = true;
-                                break;
+                    let mut found_dir_items = None;
+
+                    if is_root {
+                        for item in root_items.iter() {
+                            if let exfat::directory::Item::Directory(dir) = item {
+                                if dir.name() == *component {
+                                    found_dir_items = Some(dir.open().map_err(|e| {
+                                        io::Error::other(e.to_string())
+                                    })?);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        for item in loaded_dir.iter() {
+                            if let exfat::directory::Item::Directory(dir) = item {
+                                if dir.name() == *component {
+                                    found_dir_items = Some(dir.open().map_err(|e| {
+                                        io::Error::other(e.to_string())
+                                    })?);
+                                    break;
+                                }
                             }
                         }
                     }
-                    if !found {
-                         return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+
+                    if let Some(items) = found_dir_items {
+                        loaded_dir = items;
+                        is_root = false;
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
                     }
                 }
 
-                // Look for the file.
-                for entry in current_dir.entries() {
-                    let entry = entry?;
-                    if entry.name() == *file_name {
-                        // Ensure it is a file, not a directory.
-                        if !entry.is_dir() {
-                            // Convert to file.
-                            let mut file = entry.to_file()?;
-                            // Seek to offset.
-                            file.seek(SeekFrom::Start(offset))?;
-                            // Read data.
-                            return file.read(buf);
+                if is_root {
+                    for item in root_items.iter_mut() {
+                        if let exfat::directory::Item::File(file) = item {
+                            if file.name() == *file_name {
+                                let reader_opt = file.open().map_err(|e| {
+                                    io::Error::other(e.to_string())
+                                })?;
+                                if let Some(mut reader) = reader_opt {
+                                    reader.seek(SeekFrom::Start(offset))?;
+                                    return reader.read(buf);
+                                } else {
+                                    return Ok(0);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for item in loaded_dir.iter_mut() {
+                        if let exfat::directory::Item::File(file) = item {
+                            if file.name() == *file_name {
+                                let reader_opt = file.open().map_err(|e| {
+                                    io::Error::other(e.to_string())
+                                })?;
+                                if let Some(mut reader) = reader_opt {
+                                    reader.seek(SeekFrom::Start(offset))?;
+                                    return reader.read(buf);
+                                } else {
+                                    return Ok(0);
+                                }
+                            }
                         }
                     }
                 }
-                // File not found.
+
                 Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
             }
         }

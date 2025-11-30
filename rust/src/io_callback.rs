@@ -3,29 +3,30 @@ use std::io::{self, Read, Seek, SeekFrom};
 // Import JNI types.
 use jni::objects::{GlobalRef, JValue};
 use jni::JavaVM;
+use std::sync::Arc;
 
 // Struct to read data via a Java callback.
 #[derive(Clone)]
 pub struct CallbackReader {
     // Java VM instance to attach threads.
-    jvm: JavaVM,
+    jvm: Arc<JavaVM>,
     // Global reference to the Java callback object.
-    callback: GlobalRef,
+    callback_obj: GlobalRef,
     // Current read position.
     position: u64,
     // Total size of the data source.
-    size: u64,
+    volume_size: u64,
 }
 
 // Implementation of CallbackReader.
 impl CallbackReader {
     // Constructor.
-    pub fn new(jvm: JavaVM, callback: GlobalRef, size: u64) -> Self {
+    pub fn new(jvm: JavaVM, callback_obj: GlobalRef, volume_size: u64) -> Self {
         Self {
-            jvm,
-            callback,
+            jvm: Arc::new(jvm),
+            callback_obj,
             position: 0,
-            size,
+            volume_size,
         }
     }
 }
@@ -39,39 +40,46 @@ impl Read for CallbackReader {
         }
 
         // Attach current thread to JVM.
-        let mut env = self.jvm.attach_current_thread()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI attach failed: {}", e)))?;
+        let mut env = self.jvm.attach_current_thread().map_err(|e| {
+            io::Error::other(format!("JNI attach failed: {}", e))
+        })?;
 
         // Prepare arguments.
         let len = buf.len() as i32;
         let offset = self.position as i64;
 
         // Call Java method: byte[] read(long offset, int length)
-        let result = env.call_method(
-            &self.callback,
-            "read",
-            "(JI)[B",
-            &[JValue::Long(offset), JValue::Int(len)],
-        ).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI call failed: {}", e)))?;
+        let result = env
+            .call_method(
+                &self.callback_obj,
+                "read",
+                "(JI)[B",
+                &[JValue::Long(offset), JValue::Int(len)],
+            )
+            .map_err(|e| io::Error::other(format!("JNI call failed: {}", e)))?;
 
         // Get byte array from result.
-        let byte_array = result.l()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI result error: {}", e)))?;
+        let byte_array = result.l().map_err(|e| {
+            io::Error::other(format!("JNI result error: {}", e))
+        })?;
 
         // Check for null (EOF or error).
         if byte_array.is_null() {
             return Ok(0); // EOF or error
         }
-        
+
         // Convert Java byte array to Rust Vec<u8>.
-        let byte_array = byte_array.into_inner();
-        let bytes = env.convert_byte_array(byte_array)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI array conversion failed: {}", e)))?;
+        let ba: jni::objects::JByteArray = byte_array.into();
+        let bytes = env.convert_byte_array(&ba).map_err(|e| {
+            io::Error::other(format!("JNI array conversion failed: {}", e))
+        })?;
 
         // Check if returned data fits in buffer.
         let read_len = bytes.len();
         if read_len > buf.len() {
-             return Err(io::Error::new(io::ErrorKind::Other, "Java returned more bytes than requested"));
+            return Err(io::Error::other(
+                "Java returned more bytes than requested",
+            ));
         }
 
         // Copy data to buffer.
@@ -91,11 +99,13 @@ impl Seek for CallbackReader {
         let new_pos = match pos {
             SeekFrom::Start(p) => p,
             SeekFrom::End(p) => {
-                if self.size == 0 {
-                     return Err(io::Error::new(io::ErrorKind::Other, "Cannot seek from end: size unknown"));
+                if self.volume_size == 0 {
+                    return Err(io::Error::other(
+                        "Cannot seek from end: size unknown",
+                    ));
                 }
-                (self.size as i64 + p) as u64
-            },
+                (self.volume_size as i64 + p) as u64
+            }
             SeekFrom::Current(p) => (self.position as i64 + p) as u64,
         };
 

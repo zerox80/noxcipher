@@ -1,7 +1,7 @@
 // Import the JNIEnv type from the jni crate to interact with the Java Native Interface environment.
 use jni::JNIEnv;
 // Import JClass and JByteArray types from the jni::objects module for handling Java classes and byte arrays.
-use jni::objects::{JClass, JByteArray};
+use jni::objects::{JByteArray, JClass};
 // Import jbyteArray and jlong types from the jni::sys module, representing Java's byte[] and long types.
 use jni::sys::{jbyteArray, jlong};
 
@@ -22,7 +22,7 @@ mod io_callback;
 mod filesystem;
 
 // Import SupportedFileSystem and DecryptedReader types from the filesystem module.
-use filesystem::{SupportedFileSystem, DecryptedReader};
+use filesystem::{DecryptedReader, SupportedFileSystem};
 // Import CallbackReader from the io_callback module.
 use io_callback::CallbackReader;
 // Import the Ntfs struct from the ntfs crate (or module) for NTFS file system support.
@@ -73,7 +73,7 @@ impl log::Log for InMemoryLogger {
         if self.enabled(record.metadata()) {
             // Format the log message with the level and the message arguments.
             let log_msg = format!("{}: {}", record.level(), record.args());
-            
+
             // The following lines create CStrings for Android logging but are currently unused variables (prefixed with _).
             // Create a CString for the tag "RustNative".
             let _tag = std::ffi::CString::new("RustNative").unwrap();
@@ -81,14 +81,14 @@ impl log::Log for InMemoryLogger {
             let _msg = std::ffi::CString::new(log_msg.clone()).unwrap();
             // The comments explain that simple Android logging via FFI is possible but not implemented here.
             // We are prioritizing the in-memory buffer for the user to retrieve logs.
-            
+
             // Attempt to lock the global LOG_BUFFER mutex.
             if let Ok(mut buffer) = LOG_BUFFER.lock() {
                 // Check if the buffer size exceeds 100 entries.
-                if buffer.len() > 100 { 
+                if buffer.len() > 100 {
                     // Remove the oldest log entry (at index 0) to maintain a fixed size.
-                    buffer.remove(0); 
-                } 
+                    buffer.remove(0);
+                }
                 // Push the new log message into the buffer.
                 buffer.push(log_msg);
             }
@@ -117,7 +117,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_initLogger(
         // Set the global logger to our LOGGER instance.
         // If successful, set the max log level to Info.
         // Ignore errors if the logger is already set.
-        log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info)).ok();
+        log::set_logger(&LOGGER)
+            .map(|()| log::set_max_level(LevelFilter::Info))
+            .ok();
         // Log an info message indicating that the Rust logger has been initialized.
         log::info!("Rust logger initialized (InMemory)");
     });
@@ -142,14 +144,18 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
 
     // Find the java.lang.String class in the JVM.
     // Expect success, otherwise panic with a message.
-    let string_class = env.find_class("java/lang/String").expect("Could not find String class");
+    let string_class = env
+        .find_class("java/lang/String")
+        .expect("Could not find String class");
     // Create a new empty Java string to use as an initial element/template.
     // Expect success.
     let empty_string = env.new_string("").expect("Could not create empty string");
-    
+
     // Create a new object array of Strings with the size of the logs vector.
     // Expect success.
-    let array = env.new_object_array(logs.len() as i32, string_class, empty_string).expect("Could not create string array");
+    let array = env
+        .new_object_array(logs.len() as i32, string_class, empty_string)
+        .expect("Could not create string array");
 
     // Iterate over the logs with their index.
     for (i, log) in logs.iter().enumerate() {
@@ -158,7 +164,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
         let jstr = env.new_string(log).expect("Could not create string");
         // Set the element at index i in the array to the created Java string.
         // Expect success.
-        env.set_object_array_element(&array, i as i32, jstr).expect("Could not set array element");
+        env.set_object_array_element(&array, i as i32, jstr)
+            .expect("Could not set array element");
     }
 
     // Return the raw pointer to the Java object array.
@@ -168,6 +175,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
 // Define a JNI function named Java_com_noxcipher_RustNative_init.
 // It initializes the volume context and returns a handle (jlong).
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_init(
     // The JNI environment.
     mut env: JNIEnv,
@@ -191,7 +199,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Log that the init function has been called.
         log::info!("Rust init called");
-        
+
         // Convert the raw JByteArray password to a JByteArray object unsafely.
         let password_obj = unsafe { JByteArray::from_raw(password) };
         // Convert the Java byte array to a Rust Vec<u8>.
@@ -201,7 +209,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             // If an error occurs:
             Err(e) => {
                 // Throw a Java IllegalArgumentException with the error message.
-                let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid password array: {}", e));
+                let _ = env.throw_new(
+                    "java/lang/IllegalArgumentException",
+                    format!("Invalid password array: {}", e),
+                );
                 // Return -1 to indicate failure.
                 return -1;
             }
@@ -216,7 +227,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             // If an error occurs:
             Err(e) => {
                 // Throw a Java IllegalArgumentException with the error message.
-                let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid header array: {}", e));
+                let _ = env.throw_new(
+                    "java/lang/IllegalArgumentException",
+                    format!("Invalid header array: {}", e),
+                );
                 // Return -1 to indicate failure.
                 return -1;
             }
@@ -224,10 +238,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
 
         // Handle the optional protection password.
         let mut protection_password_bytes = if !protection_password.is_null() {
-             // If the pointer is not null, convert it to a JByteArray object unsafely.
-             let prot_obj = unsafe { JByteArray::from_raw(protection_password) };
-             // Attempt to convert the Java byte array to a Rust Vec<u8>.
-             match env.convert_byte_array(&prot_obj) {
+            // If the pointer is not null, convert it to a JByteArray object unsafely.
+            let prot_obj = unsafe { JByteArray::from_raw(protection_password) };
+            // Attempt to convert the Java byte array to a Rust Vec<u8>.
+            match env.convert_byte_array(&prot_obj) {
                 // If successful, wrap it in Some.
                 Ok(b) => Some(b),
                 // If an error occurs:
@@ -237,7 +251,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
                     // Return None.
                     None
                 }
-             }
+            }
         } else {
             // If the pointer is null, return None.
             None
@@ -246,14 +260,14 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         // Call the volume::create_context function to attempt to mount the volume.
         // Pass references to the password, header, and other parameters.
         let res = volume::create_context(
-            &password_bytes, 
-            &header_bytes, 
-            pim as i32, 
+            &password_bytes,
+            &header_bytes,
+            pim,
             partition_offset as u64,
             protection_password_bytes.as_deref(),
-            protection_pim as i32
+            protection_pim,
         );
-        
+
         // Import the Zeroize trait to securely clear memory.
         use zeroize::Zeroize;
         // Zeroize the password bytes in memory.
@@ -262,7 +276,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         if let Some(ref mut pp) = protection_password_bytes {
             pp.zeroize();
         }
-        
+
         // Match on the result of create_context.
         match res {
             // If successful:
@@ -271,7 +285,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
                 log::info!("Init success, handle: {}", handle);
                 // Return the handle.
                 handle
-            },
+            }
             // If an error occurred:
             Err(e) => {
                 // Log the error.
@@ -314,6 +328,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
 // Define a JNI function named Java_com_noxcipher_RustNative_decrypt.
 // It decrypts data in place.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
     // The JNI environment.
     mut env: JNIEnv,
@@ -337,7 +352,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
             // If an error occurs:
             Err(e) => {
                 // Throw a RuntimeException.
-                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get array length: {}", e));
+                let _ = env.throw_new(
+                    "java/lang/RuntimeException",
+                    format!("Failed to get array length: {}", e),
+                );
                 // Return early.
                 return;
             }
@@ -352,18 +370,21 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         // Copy data from the Java byte array region into the Rust buffer slice.
         if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
-             // If an error occurs, throw a RuntimeException.
-             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
-             // Return early.
-             return;
+            // If an error occurs, throw a RuntimeException.
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                format!("Failed to read array: {}", e),
+            );
+            // Return early.
+            return;
         }
 
         // Perform the decryption operation using the volume module.
         if let Err(e) = volume::decrypt(handle, offset as u64, &mut buf) {
-             // If decryption fails, throw an IOException.
-             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
-             // Return early.
-             return;
+            // If decryption fails, throw an IOException.
+            let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
+            // Return early.
+            return;
         }
 
         // Write the decrypted data back to the Java array.
@@ -374,8 +395,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         // Set the Java byte array region with the decrypted data.
         if let Err(e) = env.set_byte_array_region(&data_obj, 0, buf_slice) {
-             // If writing back fails, throw a RuntimeException.
-             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
+            // If writing back fails, throw a RuntimeException.
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                format!("Failed to write back array: {}", e),
+            );
         }
     }));
 }
@@ -383,6 +407,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 // Define a JNI function named Java_com_noxcipher_RustNative_encrypt.
 // It encrypts data in place.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
     // The JNI environment.
     mut env: JNIEnv,
@@ -406,7 +431,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
             // If an error occurs:
             Err(e) => {
                 // Throw a RuntimeException.
-                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to get array length: {}", e));
+                let _ = env.throw_new(
+                    "java/lang/RuntimeException",
+                    format!("Failed to get array length: {}", e),
+                );
                 // Return early.
                 return;
             }
@@ -418,21 +446,24 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
         let buf_ptr = buf.as_mut_ptr() as *mut i8;
         // Create a mutable slice from the raw parts.
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len as usize) };
-        
+
         // Copy data from the Java byte array region into the Rust buffer slice.
         if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
-             // If an error occurs, throw a RuntimeException.
-             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to read array: {}", e));
-             // Return early.
-             return;
+            // If an error occurs, throw a RuntimeException.
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                format!("Failed to read array: {}", e),
+            );
+            // Return early.
+            return;
         }
 
         // Perform the encryption operation using the volume module.
         if let Err(e) = volume::encrypt(handle, offset as u64, &mut buf) {
-             // If encryption fails, throw an IOException.
-             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
-             // Return early.
-             return;
+            // If encryption fails, throw an IOException.
+            let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
+            // Return early.
+            return;
         }
 
         // Write the encrypted data back to the Java array.
@@ -443,9 +474,12 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
 
         // Set the Java byte array region with the encrypted data.
         if let Err(e) = env.set_byte_array_region(&data_obj, 0, buf_slice) {
-             // If writing back fails, throw a RuntimeException.
-             let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to write back array: {}", e));
-         }
+            // If writing back fails, throw a RuntimeException.
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                format!("Failed to write back array: {}", e),
+            );
+        }
     }));
 }
 
@@ -483,7 +517,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
         // Call volume::get_data_offset to get the offset.
         volume::get_data_offset(handle)
     });
-    
+
     // Handle the result of the panic catch.
     match res {
         // If no panic and the function returned Ok:
@@ -494,7 +528,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
             let _ = env.throw_new("java/lang/IllegalArgumentException", format!("{}", e));
             // Return -1.
             -1
-        },
+        }
         // If a panic occurred:
         Err(_) => {
             // Throw a RuntimeException.
@@ -508,9 +542,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
 // Define a JNI function named Java_com_noxcipher_RustNative_mountFs.
 // It attempts to mount a file system (NTFS or exFAT) on the volume.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
     // The JNI environment.
-    mut env: JNIEnv,
+    env: JNIEnv,
     // The Java class.
     _class: JClass,
     // The volume handle.
@@ -521,7 +556,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
     volume_size: jlong,
 ) -> jlong {
     // Wrap execution in panic::catch_unwind.
-    let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Retrieve the volume context associated with the handle.
         let volume = {
             // Lock the global CONTEXTS map.
@@ -540,7 +575,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         let jvm = env.get_java_vm().expect("Failed to get JavaVM");
         // Create a global reference for the callback object so it persists.
         // Expect success.
-        let callback_global = env.new_global_ref(callback_obj).expect("Failed to create global ref");
+        let callback_global = env
+            .new_global_ref(callback_obj)
+            .expect("Failed to create global ref");
         // Create a new CallbackReader with the JVM, callback object, and volume size.
         let reader = CallbackReader::new(jvm, callback_global, volume_size as u64);
         // Create a DecryptedReader that wraps the CallbackReader and the volume context.
@@ -549,23 +586,24 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
 
         // Try mounting as NTFS.
         // Clone the decrypted reader for the NTFS attempt.
-        let reader_clone = decrypted_reader.clone();
+        let mut reader_clone = decrypted_reader.clone();
         // Attempt to create a new Ntfs instance.
-        if let Ok(ntfs) = Ntfs::new(reader_clone) {
-             // Log success.
-             log::info!("Mounted NTFS");
-             // Lock the FILESYSTEMS map.
-             let mut lock = FILESYSTEMS.lock().unwrap();
-             // Lock the NEXT_FS_HANDLE counter.
-             let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
-             // Get the current handle value.
-             let handle = *handle_lock;
-             // Increment the handle counter.
-             *handle_lock += 1;
-             // Insert the NTFS instance into the map with the new handle.
-             lock.insert(handle, SupportedFileSystem::Ntfs(ntfs));
-             // Return the handle.
-             return handle;
+        // Attempt to create a new Ntfs instance.
+        if Ntfs::new(&mut reader_clone).is_ok() {
+            // Log success.
+            log::info!("Mounted NTFS");
+            // Lock the FILESYSTEMS map.
+            let mut lock = FILESYSTEMS.lock().unwrap();
+            // Lock the NEXT_FS_HANDLE counter.
+            let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
+            // Get the current handle value.
+            let handle = *handle_lock;
+            // Increment the handle counter.
+            *handle_lock += 1;
+            // Insert the NTFS reader into the map with the new handle.
+            lock.insert(handle, SupportedFileSystem::Ntfs(reader_clone));
+            // Return the handle.
+            return handle;
         }
 
         // Try mounting as exFAT.
@@ -573,32 +611,36 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         let reader_clone2 = decrypted_reader.clone();
         // Attempt to open as ExFat.
         if let Ok(exfat) = ExFat::open(reader_clone2) {
-             // Log success.
-             log::info!("Mounted exFAT");
-             // Lock the FILESYSTEMS map.
-             let mut lock = FILESYSTEMS.lock().unwrap();
-             // Lock the NEXT_FS_HANDLE counter.
-             let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
-             // Get the current handle value.
-             let handle = *handle_lock;
-             // Increment the handle counter.
-             *handle_lock += 1;
-             // Insert the exFAT instance into the map with the new handle.
-             lock.insert(handle, SupportedFileSystem::ExFat(exfat));
-             // Return the handle.
-             return handle;
+            // Log success.
+            log::info!("Mounted exFAT");
+            // Lock the FILESYSTEMS map.
+            let mut lock = FILESYSTEMS.lock().unwrap();
+            // Lock the NEXT_FS_HANDLE counter.
+            let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
+            // Get the current handle value.
+            let handle = *handle_lock;
+            // Increment the handle counter.
+            *handle_lock += 1;
+            // Insert the exFAT instance into the map with the new handle.
+            // Insert the exFAT instance into the map with the new handle.
+            let items: Vec<_> = exfat.into_iter().collect();
+            lock.insert(handle, SupportedFileSystem::ExFat(items));
+            // Return the handle.
+            return handle;
         }
 
         // Log a warning if neither NTFS nor exFAT could be mounted.
         log::warn!("Failed to detect NTFS or exFAT");
         // Return -1 to indicate failure.
         -1
-    })).unwrap_or(-1); // If a panic occurred, return -1.
+    }))
+    .unwrap_or(-1) // If a panic occurred, return -1.
 }
 
 // Define a JNI function named Java_com_noxcipher_RustNative_listFiles.
 // It lists files in a directory of the mounted file system.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
     // The JNI environment.
     mut env: JNIEnv,
@@ -611,8 +653,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
 ) -> jobjectArray {
     // Convert the Java string path to a Rust String.
     // If conversion fails, use an empty string.
-    let path: String = env.get_string(&path_obj).map(|s| s.into()).unwrap_or_default();
-    
+    let path: String = env
+        .get_string(&path_obj)
+        .map(|s| s.into())
+        .unwrap_or_default();
+
     // Retrieve the list of files from the file system.
     let files = {
         // Lock the FILESYSTEMS map.
@@ -630,30 +675,47 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
 
     // Find the com.noxcipher.RustFile class.
     // Expect success.
-    let file_class = env.find_class("com/noxcipher/RustFile").expect("RustFile class not found");
+    let file_class = env
+        .find_class("com/noxcipher/RustFile")
+        .expect("RustFile class not found");
     // Get the constructor ID for RustFile (String name, boolean isDir, long size).
     // Expect success.
-    let init_id = env.get_method_id(&file_class, "<init>", "(Ljava/lang/String;ZJ)V").expect("RustFile constructor not found");
-    
+    let init_id = env
+        .get_method_id(&file_class, "<init>", "(Ljava/lang/String;ZJ)V")
+        .expect("RustFile constructor not found");
+
     // Create a new object array of RustFile objects with the size of the files vector.
     // Initialize with null.
     // Expect success.
-    let array = env.new_object_array(files.len() as i32, &file_class, jni::objects::JObject::null()).expect("Failed to create array");
+    let array = env
+        .new_object_array(
+            files.len() as i32,
+            &file_class,
+            jni::objects::JObject::null(),
+        )
+        .expect("Failed to create array");
 
     // Iterate over the files and populate the array.
     for (i, f) in files.iter().enumerate() {
         // Create a Java string for the file name.
         let name_jstr = env.new_string(&f.name).unwrap();
         // Create a new RustFile object using the constructor.
-        let obj = env.new_object(&file_class, init_id, &[
-            JValue::Object(&name_jstr), // name
-            JValue::Bool(f.is_dir as u8), // isDir
-            JValue::Long(f.size as i64) // size
-        ]).unwrap();
+        let obj = unsafe {
+            env.new_object_unchecked(
+                &file_class,
+                init_id,
+                &[
+                    JValue::Object(&name_jstr).as_jni(),   // name
+                    JValue::Bool(f.is_dir as u8).as_jni(), // isDir
+                    JValue::Long(f.size as i64).as_jni(),  // size
+                ],
+            )
+        }
+        .unwrap();
         // Set the array element at index i.
         env.set_object_array_element(&array, i as i32, obj).unwrap();
     }
-    
+
     // Return the raw pointer to the array.
     array.into_raw()
 }
@@ -661,6 +723,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
 // Define a JNI function named Java_com_noxcipher_RustNative_readFile.
 // It reads content from a file in the mounted file system.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     // The JNI environment.
     mut env: JNIEnv,
@@ -677,36 +740,39 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
 ) -> jlong {
     // Convert the Java string path to a Rust String.
     // If conversion fails, use an empty string.
-    let path: String = env.get_string(&path_obj).map(|s| s.into()).unwrap_or_default();
-    
+    let path: String = env
+        .get_string(&path_obj)
+        .map(|s| s.into())
+        .unwrap_or_default();
+
     // Access the file system.
     let mut lock = FILESYSTEMS.lock().unwrap();
     // Look up the file system by handle.
     if let Some(fs) = lock.get_mut(&fs_handle) {
-         // Convert the raw JByteArray buffer to a JByteArray object unsafely.
-         let buf_obj = unsafe { JByteArray::from_raw(buffer) };
-         // Get the length of the buffer.
-         let len = env.get_array_length(&buf_obj).unwrap_or(0);
-         // Allocate a Rust vector of zeros with the same length.
-         let mut buf = vec![0u8; len as usize];
-         
-         // Read the file content into the buffer.
-         match fs.read_file(&path, offset as u64, &mut buf) {
-             // If successful, returns the number of bytes read.
-             Ok(bytes_read) => {
-                 // Write the data back to the Java array.
-                 // Get a const pointer to the buffer and cast it to i8.
-                 let buf_ptr = buf.as_ptr() as *const i8;
-                 // Create a slice from the raw parts with the number of bytes read.
-                 let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
-                 // Set the Java byte array region.
-                 env.set_byte_array_region(&buf_obj, 0, buf_slice).unwrap();
-                 // Return the number of bytes read as jlong.
-                 bytes_read as jlong
-             },
-             // If reading fails, return -1.
-             Err(_) => -1
-         }
+        // Convert the raw JByteArray buffer to a JByteArray object unsafely.
+        let buf_obj = unsafe { JByteArray::from_raw(buffer) };
+        // Get the length of the buffer.
+        let len = env.get_array_length(&buf_obj).unwrap_or(0);
+        // Allocate a Rust vector of zeros with the same length.
+        let mut buf = vec![0u8; len as usize];
+
+        // Read the file content into the buffer.
+        match fs.read_file(&path, offset as u64, &mut buf) {
+            // If successful, returns the number of bytes read.
+            Ok(bytes_read) => {
+                // Write the data back to the Java array.
+                // Get a const pointer to the buffer and cast it to i8.
+                let buf_ptr = buf.as_ptr() as *const i8;
+                // Create a slice from the raw parts with the number of bytes read.
+                let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
+                // Set the Java byte array region.
+                env.set_byte_array_region(&buf_obj, 0, buf_slice).unwrap();
+                // Return the number of bytes read as jlong.
+                bytes_read as jlong
+            }
+            // If reading fails, return -1.
+            Err(_) => -1,
+        }
     } else {
         // If file system not found, return -1.
         -1
