@@ -32,6 +32,7 @@ camellia = "0.1"
 kuznyechik = "0.4"
 ntfs = "0.4"
 exfat = "0.1"
+sha-1 = "0.10"
 
 zeroize = { version = "1.6", features = ["derive"] }
 

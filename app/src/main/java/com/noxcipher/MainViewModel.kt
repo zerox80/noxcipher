@@ -271,30 +271,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             var handle: Long? = null
                             
                             // Try each candidate header.
+                            var primaryError: String? = null
+                            
                             for ((offset, type) in candidates) {
                                 try {
+                                    _logs.emit("Checking ${type} header at offset $offset...")
+                                    
                                     // Read 128KB buffer to cover potential header locations.
                                     val headerBuffer = ByteBuffer.allocate(131072) 
-                                    // Actually we only need 512 bytes for the header itself, but salt is first 64.
-                                    // Rust expects 512 bytes (salt + header).
                                     
                                     physicalDriver.read(offset, headerBuffer)
                                     val headerBytes = headerBuffer.array() // Pass full buffer.
                                     
+                                    // Log partition info for debugging
+                                    if (type == "Primary") {
+                                        val sizeMb = volSize / (1024 * 1024)
+                                        val hexStart = headerBytes.take(16).joinToString(" ") { "%02X".format(it) }
+                                        val asciiStart = headerBytes.take(16).map { if (it in 32..126) it.toInt().toChar() else '.' }.joinToString("")
+                                        _logs.emit("Partition Size: ${sizeMb} MB")
+                                        _logs.emit("Header [0-16]: $hexStart | $asciiStart")
+                                    }
+
+                                    // Optimization 1: Check for all-zero header (Empty/Blank)
+                                    if (type == "Primary" && isAllZeros(headerBytes)) {
+                                        val msg = "Skipped: Header is all zeros (Empty)"
+                                        lastError = msg
+                                        _logs.emit(msg)
+                                        break
+                                    }
+
+                                    // Optimization 2: Check for common filesystem signatures (NTFS, exFAT, FAT)
+                                    if (type == "Primary" && isCommonFileSystem(headerBytes)) {
+                                        val msg = "Skipped: Detected unencrypted filesystem"
+                                        lastError = msg
+                                        _logs.emit(msg)
+                                        break 
+                                    }
+                                    
                                     // Attempt to initialize volume with Rust native code.
-                                    handle = RustNative.init(password, headerBytes, pim, partitionOffset, protectionPassword, protectionPim)
+                                    _logs.emit("Verifying credentials...")
+                                    
+                                    // Prepare password candidates (Raw + Trimmed)
+                                    // Android keyboards often add a trailing space.
+                                    val passwordCandidates = mutableListOf<ByteArray>()
+                                    passwordCandidates.add(password)
+                                    
+                                    // Check for trailing space (0x20)
+                                    if (password.isNotEmpty() && password.last() == 0x20.toByte()) {
+                                        var end = password.size - 1
+                                        while (end >= 0 && password[end] == 0x20.toByte()) {
+                                            end--
+                                        }
+                                        val trimmed = password.copyOfRange(0, end + 1)
+                                        if (trimmed.isNotEmpty()) {
+                                            passwordCandidates.add(trimmed)
+                                        }
+                                    }
+
+                                    for ((index, pwd) in passwordCandidates.withIndex()) {
+                                        if (index > 0) _logs.emit("Trying trimmed password...")
+                                        
+                                        // DEBUG: Log password hex to verify encoding
+                                        val hexPwd = pwd.joinToString("") { "%02X".format(it) }
+                                        _logs.emit("Pass Hex: $hexPwd")
+
+                                        handle = RustNative.init(pwd, headerBytes, pim, partitionOffset, protectionPassword, protectionPim)
+                                        if (handle != null && handle > 0) {
+                                            lastError = "Success ($type)"
+                                            _logs.emit("Volume mounted successfully!")
+                                            break
+                                        }
+                                    }
+                                    
                                     if (handle != null && handle > 0) {
-                                        lastError = "Success ($type)"
                                         break
                                     }
                                 } catch (e: Exception) {
                                     // Failed this candidate.
-                                    lastError = "Failed $type: ${e.message}"
+                                    val msg = "Failed $type: ${e.message}"
+                                    lastError = msg
+                                    _logs.emit(msg)
+                                    
+                                    // Capture primary error specifically.
+                                    if (type == "Primary") {
+                                        primaryError = msg
+                                    }
                                 }
                             }
 
                             // If no valid handle obtained, continue to next partition.
                             if (handle == null || handle <= 0) {
+                                // If we had a primary error that indicates a crypto/password failure,
+                                // and the last error was an IO error (like MAX RECOVERY ATTEMPTS exceeded from backup),
+                                // revert to the primary error as it's more actionable for the user.
+                                if (primaryError != null && lastError?.contains("Invalid password") == false && lastError?.contains("MAX RECOVERY") == true) {
+                                    lastError = primaryError
+                                }
                                 continue
                             }
                             
@@ -412,6 +484,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             // Ignore errors during close.
         }
+    }
+
+    // Helper to detect common unencrypted filesystems
+    private fun isCommonFileSystem(bytes: ByteArray): Boolean {
+        if (bytes.size < 512) return false
+        
+        // Helper to check ASCII string at offset
+        fun hasString(offset: Int, value: String): Boolean {
+            if (offset + value.length > bytes.size) return false
+            for (i in value.indices) {
+                if (bytes[offset + i] != value[i].code.toByte()) return false
+            }
+            return true
+        }
+
+        // NTFS: "NTFS    " at offset 3
+        if (hasString(3, "NTFS")) return true
+        
+        // exFAT: "EXFAT   " at offset 3
+        if (hasString(3, "EXFAT")) return true
+        
+        // FAT32: "FAT32   " at offset 82
+        if (hasString(82, "FAT32")) return true
+        
+        // FAT16: "FAT16   " at offset 54
+        if (hasString(54, "FAT16")) return true
+        
+        return false
+    }
+
+    // Helper to check if header is all zeros (first 512 bytes)
+    private fun isAllZeros(bytes: ByteArray): Boolean {
+        val checkLen = if (bytes.size < 512) bytes.size else 512
+        for (i in 0 until checkLen) {
+            if (bytes[i] != 0.toByte()) return false
+        }
+        return true
     }
 
     // Called when ViewModel is cleared.

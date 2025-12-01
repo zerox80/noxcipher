@@ -46,23 +46,6 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_SHORT).show()
                         
                         // Auto-connect if password is available
-                        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
-                        val passwordText = etPassword.text
-                        if (!passwordText.isNullOrEmpty() && device != null) {
-                            val etPim = findViewById<android.widget.EditText>(R.id.etPim)
-                            val pimText = etPim.text.toString()
-                            val pim = if (pimText.isEmpty()) 0 else pimText.toIntOrNull() ?: 0
-
-                            val passwordBytes = ByteArray(passwordText.length)
-                            for (i in passwordText.indices) {
-                                passwordBytes[i] = passwordText[i].code.toByte()
-                            }
-                            
-                            connectDevice(device, passwordBytes, pim)
-                            passwordText.clear()
-                        }
-                    } else {
-                        log("Permission denied for device $device")
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
@@ -186,11 +169,8 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                // Manual conversion to avoid uncleared ByteBuffer
-                val passwordBytes = ByteArray(passwordText.length)
-                for (i in passwordText.indices) {
-                    passwordBytes[i] = passwordText[i].code.toByte()
-                }
+                // Use UTF-8 encoding for password (standard for Veracrypt)
+                val passwordBytes = passwordText.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
 
                 connectDevice(device, passwordBytes, pim)
                 

@@ -12,6 +12,7 @@ use pbkdf2::pbkdf2;
 use hmac::{Hmac, SimpleHmac};
 // Import SHA-2 hash functions.
 use sha2::{Sha256, Sha512};
+use sha1::Sha1;
 // Import Whirlpool hash function.
 use whirlpool::Whirlpool;
 // Import Serpent cipher.
@@ -39,7 +40,7 @@ use cipher::{BlockCipher, KeyInit, KeySizeUser};
 #[allow(unused_assignments)]
 pub enum VolumeError {
     // Error indicating an invalid password or PIM.
-    InvalidPassword,
+    InvalidPassword(String),
     // Error indicating an invalid volume header.
     InvalidHeader(HeaderError),
     // Generic cryptographic error with a message.
@@ -61,7 +62,7 @@ impl fmt::Display for VolumeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             // Write "Invalid password or PIM" for InvalidPassword.
-            VolumeError::InvalidPassword => write!(f, "Invalid password or PIM"),
+            VolumeError::InvalidPassword(debug) => write!(f, "Invalid password or PIM ({})", debug),
             // Write "Invalid volume header: " followed by the header error.
             VolumeError::InvalidHeader(e) => write!(f, "Invalid volume header: {}", e),
             // Write "Crypto Error: " followed by the message.
@@ -368,7 +369,12 @@ pub fn create_context(
     }
 
     // Return InvalidPassword if all attempts fail.
-    Err(VolumeError::InvalidPassword)
+    // We should probably capture the debug info from the last attempt?
+    // But try_header_at_offset tries MANY combinations.
+    // It returns InvalidPassword if NONE work.
+    // We need to propagate the debug info from try_header_at_offset.
+    
+    Err(VolumeError::InvalidPassword("All attempts failed".to_string()))
 }
 
 // Renamed helper to return Volume
@@ -531,30 +537,38 @@ fn try_header_at_offset(
         Err(VolumeError::InvalidPassword)
     };
 
+    let mut last_debug = "None".to_string();
+
     // Iterate through all iteration counts.
     for &iter in &iterations_list {
         // 1. SHA-512
         // Derive key using PBKDF2-HMAC-SHA512.
         pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock with this key.
-        if let Ok(vol) = try_unlock(&header_key) {
-            return Ok(vol);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
         }
 
         // 2. SHA-256
         // Derive key using PBKDF2-HMAC-SHA256.
         pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
-        if let Ok(vol) = try_unlock(&header_key) {
-            return Ok(vol);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
         }
 
         // 3. Whirlpool
         // Derive key using PBKDF2-HMAC-Whirlpool.
         pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
-        if let Ok(vol) = try_unlock(&header_key) {
-            return Ok(vol);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
         }
 
         // 4. Blake2s
@@ -563,16 +577,20 @@ fn try_header_at_offset(
         // Derive key using PBKDF2-SimpleHmac-Blake2s256.
         pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
-        if let Ok(vol) = try_unlock(&header_key) {
-            return Ok(vol);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
         }
 
         // 5. Streebog
         // Derive key using PBKDF2-SimpleHmac-Streebog512.
         pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
-        if let Ok(vol) = try_unlock(&header_key) {
-            return Ok(vol);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
         }
 
         // 6. RIPEMD-160
@@ -597,17 +615,28 @@ fn try_header_at_offset(
         // Derive key using PBKDF2-HMAC-Ripemd160.
         pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut header_key).ok();
         // Try to unlock.
-        let res = try_unlock(&header_key);
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
+        }
+
+        // 7. SHA-1 (Legacy)
+        // Derive key using PBKDF2-HMAC-SHA1.
+        pbkdf2::<Hmac<Sha1>>(password, salt, iter, &mut header_key).ok();
+        // Try to unlock.
+        match try_unlock(&header_key) {
+            Ok(vol) => return Ok(vol),
+            Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
+            _ => {}
+        }
+
         // Zeroize the header key after use.
         header_key.zeroize();
-        // Return result if successful.
-        if let Ok(vol) = res {
-            return Ok(vol);
-        }
     }
 
     // Return InvalidPassword if all hash algorithms and iteration counts fail.
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword(last_debug))
 }
 
 // Function to register a volume context in the global map.
@@ -771,8 +800,11 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
             false,
         ));
     }
-    // Return InvalidPassword if deserialization fails.
-    Err(VolumeError::InvalidPassword)
+    
+    // Capture the first 4 bytes (Magic) for debugging.
+    let magic_hex = hex::encode(&decrypted[0..4]);
+    // Return InvalidPassword with debug info.
+    Err(VolumeError::InvalidPassword(format!("Magic: {}", magic_hex)))
 }
 
 // Function to try Serpent cipher.
