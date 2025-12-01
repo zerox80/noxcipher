@@ -27,6 +27,20 @@ class FileBrowserActivity : AppCompatActivity() {
         setContentView(R.layout.activity_file_browser) // Sets the UI layout for this activity from the XML resource
         lvFiles = findViewById(R.id.lvFiles) // Finds the ListView in the layout by its ID and assigns it to lvFiles
 
+        // Handle back press using OnBackPressedDispatcher
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // Checks if the current directory is not null and is not the root directory
+                if (currentDir != null && !currentDir!!.isRoot) {
+                    // Go up one level in the directory hierarchy
+                    currentDir = currentDir!!.parent // Sets currentDir to its parent directory
+                    loadFiles() // Reloads the file list for the new current directory
+                } else {
+                    finish() // If at root or null, close activity
+                }
+            }
+        })
+
         val fs = SessionManager.activeFileSystem // Retrieves the active file system from the SessionManager
         // Checks if the file system is null (session expired or not set)
         if (fs == null) {
@@ -40,17 +54,6 @@ class FileBrowserActivity : AppCompatActivity() {
         loadFiles() // Calls the function to load and display files in the current directory
     }
 
-    // Called when the user presses the back button
-    override fun onBackPressed() {
-        // Checks if the current directory is not null and is not the root directory
-        if (currentDir != null && !currentDir!!.isRoot) {
-            // Go up one level in the directory hierarchy
-            currentDir = currentDir!!.parent // Sets currentDir to its parent directory
-            loadFiles() // Reloads the file list for the new current directory
-        } else {
-            super.onBackPressed() // If at root or null, performs the default back action (close activity)
-        }
-    }
 
     // Function to load files from the current directory and display them
     private fun loadFiles() {
