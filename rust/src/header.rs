@@ -30,6 +30,7 @@ pub enum HeaderError {
     DataTooShort(usize),
     // Error variant indicating Key Area CRC mismatch
     InvalidKeyAreaCrc { expected: u32, calculated: u32 },
+    InvalidLayout,
 }
 
 // Implement the fmt::Display trait for HeaderError to provide user-friendly error messages.
@@ -51,6 +52,7 @@ impl fmt::Display for HeaderError {
             // For InvalidKeySize, write "Invalid Key Size" to the formatter.
             HeaderError::InvalidKeySize => write!(f, "Invalid Key Size"),
             HeaderError::DataTooShort(l) => write!(f, "Header data too short: {} bytes", l),
+            HeaderError::InvalidLayout => write!(f, "Invalid Header Layout (Overflow)"),
             HeaderError::InvalidKeyAreaCrc { expected, calculated } => write!(f, "Key Area CRC mismatch: expected {:#010x}, calculated {:#010x}", expected, calculated),
         }
     }
@@ -191,7 +193,7 @@ impl VolumeHeader {
 
         // Check for overflow in encrypted area range
         if encrypted_area_start.checked_add(encrypted_area_length).is_none() {
-             return Err(HeaderError::DataTooShort(0)); // Or a new specific error
+             return Err(HeaderError::InvalidLayout); // Reusing generic invalid error
         }
 
         // Read the flags (4 bytes) from offset 60.
@@ -265,6 +267,37 @@ impl VolumeHeader {
         // Return true if Key1 is identical to Key2, indicating a vulnerability.
         // Otherwise, return false.
         key1 == key2
+    }
+
+    // Constructor for creating a new VolumeHeader.
+    pub fn new(
+        version: u16,
+        min_program_version: u16,
+        volume_creation_time: u64,
+        header_creation_time: u64,
+        hidden_volume_size: u64,
+        volume_data_size: u64,
+        encrypted_area_start: u64,
+        encrypted_area_length: u64,
+        flags: u32,
+        sector_size: u32,
+        master_key_data: [u8; 256],
+    ) -> Self {
+        VolumeHeader {
+            version,
+            min_program_version,
+            crc32: 0, // Will be calculated on serialize
+            volume_creation_time,
+            header_creation_time,
+            hidden_volume_size,
+            volume_data_size,
+            encrypted_area_start,
+            encrypted_area_length,
+            flags,
+            sector_size,
+            key_area_crc32: 0, // Will be calculated on serialize
+            master_key_data,
+        }
     }
 
     // Function to serialize the VolumeHeader into a byte buffer.

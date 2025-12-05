@@ -94,9 +94,9 @@ pub struct Volume {
     // The cipher used for encryption/decryption.
     cipher: SupportedCipher,
     // The offset where the partition starts.
-    partition_start_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
     // The offset of the hidden volume, if any.
-    hidden_volume_offset: u64,
+    
     // Flag indicating if the volume is read-only.
     read_only: bool,
     // Start of the protected range (for hidden volume protection).
@@ -120,8 +120,8 @@ impl Volume {
     pub fn new(
         header: VolumeHeader,
         cipher: SupportedCipher,
-        partition_start_offset: u64,
-        hidden_volume_offset: u64,
+        partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+        
         read_only: bool,
     ) -> Self {
         // Return a new Volume struct with initialized fields.
@@ -130,7 +130,6 @@ impl Volume {
             cipher,
             partition_start_offset,
             hidden_volume_offset,
-            read_only,
             read_only,
             protected_range_start: 0,
             protected_range_end: 0,
@@ -326,7 +325,7 @@ pub fn create_context(
     password: &[u8],
     header_bytes: &[u8],
     pim: i32,
-    partition_start_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
     protection_password: Option<&[u8]>,
     protection_pim: i32,
     volume_size: u64,
@@ -397,10 +396,10 @@ pub fn create_context(
 
     // 3. Try Backup Header at offset (Volume Size - 131072)
     // VeraCrypt stores a backup header at the end of the volume.
-    // Offset is: volume_size - 131072
+    // Offset is: volume_size - 65536
     // 3. Try Backup Header at offset (Volume Size - 131072)
     // VeraCrypt stores a backup header at the end of the volume.
-    // Offset is: volume_size - 131072
+    // Offset is: volume_size - 65536
     // 3. Try Backup Header if provided or calculated
     if protection_password.is_none() {
         if let Some(bh) = backup_header_bytes {
@@ -442,7 +441,7 @@ pub fn create_context(
             }
         } else if volume_size >= 131072 {
             // Fallback to legacy behavior if backup_header_bytes not provided but buffer might be large enough
-            let backup_offset = volume_size - 131072;
+            let backup_offset = volume_size - 65536;
             
             // conversion to usize might fail on 32-bit systems for large volumes
             if let Ok(backup_offset_usize) = usize::try_from(backup_offset) {
@@ -476,7 +475,7 @@ pub fn create_context(
         full_buffer: &[u8],
         pim: i32,
         offset: usize,
-        partition_start_offset: u64,
+        partition_start_offset: u64, hidden_volume_offset: Option<u64>,
     ) -> Result<Volume, VolumeError> {
         // Check if buffer has enough data for the header with overflow protection.
         if offset.checked_add(512).map_or(true, |end| full_buffer.len() < end) {
@@ -534,13 +533,12 @@ pub fn create_context(
 
     // Helper closure to try all supported ciphers with a derived key.
     let try_unlock = |key: &[u8]| -> Result<Volume, VolumeError> {
-        let hv_offset = offset as u64;
+        let hv_opt = if offset == 0 { None } else { Some(offset as u64) };
         // Try AES
         if let Ok(v) = try_cipher::<Aes256>(
             key,
             encrypted_header,
-            partition_start_offset,
-            hv_offset,
+            partition_start_offset, hv_opt,
             |k1, k2| {
                 SupportedCipher::Aes(Xts128::new(AesWrapper::new(k1.into()), AesWrapper::new(k2.into())))
             },
@@ -548,7 +546,7 @@ pub fn create_context(
             return Ok(v);
         }
         // Try Serpent
-        if let Ok(v) = try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_offset)
+        if let Ok(v) = try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
@@ -556,8 +554,7 @@ pub fn create_context(
         if let Ok(v) = try_cipher::<Twofish>(
             key,
             encrypted_header,
-            partition_start_offset,
-            hv_offset,
+            partition_start_offset, hv_opt,
             |k1, k2| {
                 SupportedCipher::Twofish(Xts128::new(
                     TwofishWrapper::new(k1.into()),
@@ -571,60 +568,60 @@ pub fn create_context(
         // Cascades
         // Try AES-Twofish
         if let Ok(v) =
-            try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try AES-Twofish-Serpent
         if let Ok(v) =
-            try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Serpent-AES
         if let Ok(v) =
-            try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Twofish-Serpent
         if let Ok(v) =
-            try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Serpent-Twofish-AES
         if let Ok(v) =
-            try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Camellia
-        if let Ok(v) = try_cipher_camellia(key, encrypted_header, partition_start_offset, hv_offset)
+        if let Ok(v) = try_cipher_camellia(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Kuznyechik
         if let Ok(v) =
-            try_cipher_kuznyechik(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Camellia-Kuznyechik
         if let Ok(v) =
-            try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Camellia-Serpent
         if let Ok(v) =
-            try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
         // Try Kuznyechik-AES
         if let Ok(v) =
-            try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
@@ -632,14 +629,13 @@ pub fn create_context(
         if let Ok(v) = try_cipher_kuznyechik_serpent_camellia(
             key,
             encrypted_header,
-            partition_start_offset,
-            hv_offset,
+            partition_start_offset, hv_opt,
         ) {
             return Ok(v);
         }
         // Try Kuznyechik-Twofish
         if let Ok(v) =
-            try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_offset)
+            try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_opt)
         {
             return Ok(v);
         }
@@ -727,8 +723,9 @@ pub fn create_context(
         // Calculate specific iteration count for RIPEMD-160.
         let ripemd_iter = if pim > 0 {
             // For RIPEMD-160, PIM formula is same as others.
-            // Use checked arithmetic to prevent overflow.
-            15000u32.checked_add((pim as u32).checked_mul(1000).unwrap_or(u32::MAX)).unwrap_or(u32::MAX)
+            // Use checked arithmetic to prevent overflow. Use u64 then cast to u32 max.
+            let iter = 15000u64.checked_add((pim as u64).checked_mul(1000).unwrap_or(u64::MAX)).unwrap_or(u64::MAX);
+            if iter > u32::MAX as u64 { u32::MAX } else { iter as u32 }
         } else {
             // Map standard iteration counts to RIPEMD specific ones.
             if iter == 500_000 {
@@ -875,8 +872,7 @@ pub fn get_data_offset(handle: i64) -> Result<u64, VolumeError> {
 fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
     create_cipher: impl Fn(&[u8], &[u8]) -> SupportedCipher,
 ) -> Result<Volume, VolumeError> {
     // Get the key size for the cipher.
@@ -928,8 +924,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
 
         // Check for vulnerable keys.
         if header.is_key_vulnerable(key_size) {
-            // return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return the new Volume.
@@ -952,8 +947,8 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
 fn try_cipher_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_1 = &header_key[0..32];
@@ -1000,8 +995,8 @@ fn try_cipher_serpent(
 fn try_cipher_aes_twofish(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // VeraCrypt AESTwofish: Twofish then AES.
     // Key mapping: 0..32 -> Twofish, 32..64 -> AES.
@@ -1070,8 +1065,8 @@ fn try_cipher_aes_twofish(
 fn try_cipher_aes_twofish_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1147,8 +1142,8 @@ fn try_cipher_aes_twofish_serpent(
 fn try_cipher_serpent_aes(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_aes_1 = &header_key[0..32];
@@ -1210,8 +1205,8 @@ fn try_cipher_serpent_aes(
 fn try_cipher_twofish_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1279,8 +1274,8 @@ fn try_cipher_twofish_serpent(
 fn try_cipher_serpent_twofish_aes(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_aes_1 = &header_key[0..32];
@@ -1355,8 +1350,8 @@ fn try_cipher_serpent_twofish_aes(
 fn try_cipher_camellia(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Use generic try_cipher with CamelliaWrapper.
     try_cipher::<CamelliaWrapper>(
@@ -1377,8 +1372,8 @@ fn try_cipher_camellia(
 fn try_cipher_kuznyechik(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Use generic try_cipher with KuznyechikWrapper.
     try_cipher::<KuznyechikWrapper>(
@@ -1399,8 +1394,8 @@ fn try_cipher_kuznyechik(
 fn try_cipher_camellia_kuznyechik(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_kuznyechik_1 = &header_key[0..32];
@@ -1468,8 +1463,8 @@ fn try_cipher_camellia_kuznyechik(
 fn try_cipher_camellia_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1537,8 +1532,8 @@ fn try_cipher_camellia_serpent(
 fn try_cipher_kuznyechik_aes(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_aes_1 = &header_key[0..32];
@@ -1600,8 +1595,8 @@ fn try_cipher_kuznyechik_aes(
 fn try_cipher_kuznyechik_serpent_camellia(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_camellia_1 = &header_key[0..32];
@@ -1686,8 +1681,8 @@ fn try_cipher_kuznyechik_serpent_camellia(
 fn try_cipher_kuznyechik_twofish(
     header_key: &[u8],
     encrypted_header: &[u8],
-    partition_start_offset: u64,
-    hidden_volume_offset: u64,
+    partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_twofish_1 = &header_key[0..32];
@@ -1808,9 +1803,10 @@ pub fn change_password(
         SupportedCipher::Aes(_) => {
              // AES-256 XTS
              let key = &new_header_key[0..64];
-             let xts = Xts128::<Aes256>::new_from_slice(
-                  &key[0..32], &key[32..64]
-             ).map_err(|_| VolumeError::CryptoError("Key error".into()))?;
+             // Use new(cipher1, cipher2) instead of new_from_slice which does not exist
+             let c1 = AesWrapper::new((&key[0..32]).into());
+             let c2 = AesWrapper::new((&key[32..64]).into());
+             let xts = Xts128::<AesWrapper>::new(c1, c2);
              
              // Encrypt 448 bytes at offset 64. Tweak 0.
              // Note: xts_mode crate might require sector size alignment? 448 is aligned to 16.
@@ -1856,29 +1852,65 @@ pub fn create_volume(
         .map_err(|e| VolumeError::IoError(e))?;
         
     // Generate Master Key (64 bytes for AES-256 XTS).
-    let mut master_key = [0u8; 64];
+    let mut master_key = [0u8; 256]; // Max size
     use rand::RngCore;
+    // We only support AES for new volumes here for now (64 bytes used)
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut master_key);
     
     // Create Header struct
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     
-    // We need to construct VolumeHeader manually.
-    // But struct fields might be private?
-    // VolumeHeader fields are pub(crate). We are in the same crate (volume.rs is sibling to header.rs? No).
-    // header.rs defines VolumeHeader.
-    // If fields are not pub, we need a constructor in header.rs.
-    // They are likely pub or pub(crate). header.rs had: `pub struct VolumeHeader { pub version: u16 ... }`?
-    // Let's assume we can construct it or add a 'new' method.
-    // Checking previous header.rs view: `pub struct VolumeHeader`... fields were not shown?
-    // `VolumeHeader::deserialize` constructs it.
-    // We should better add a `VolumeHeader::new(...)` in `header.rs`.
+    let mut header = VolumeHeader::new(
+        5, // Version
+        0x0100, // Min Program Version
+        now,
+        now,
+        0, // Hidden Vol Size
+        size - 262144, // Data Size (Size - 2*128KB headers?)
+        // Standard layout: Header (128KB area reserved? No, 512 bytes used but space is reserved usually)
+        // VeraCrypt reserves 128KB at start and end.
+        131072, // Encrypted Area Start
+        size - 262144, // Length
+        0, // Flags
+        512, // Sector Size
+        master_key,
+    );
     
-    // Minimal placeholder or fail if I can't construct.
-    // I will defer `create_volume` impl detail to next step after checking/adding constructor.
-    // Just return Ok for now to pass compilation of signature? No, that's misleading.
-    // I'll leave it as TODO in body.
+    // Calculate CRC32s happens in serialize
+    
+    // Generate Salt
+    let mut salt = [0u8; 64];
+    rng.fill_bytes(&mut salt);
+    
+    // Serialize and Encrypt Header
+    // Derive Header Key
+    let mut header_key = [0u8; 96]; // Buffer for derived key
+    let iters = if pim <= 0 { 500000 } else { 15000 + (pim as u32) * 1000 };
+    pbkdf2::<Hmac<Sha512>>(password, &salt, iters, &mut header_key);
+    
+    // Encrypt
+    let mut buffer = header.serialize(&salt).map_err(|e| VolumeError::InvalidHeader(e))?;
+    
+    // Encrypt using AES-256 XTS (default for new volumes)
+    let key = &header_key[0..64];
+    let c1 = AesWrapper::new((&key[0..32]).into());
+    let c2 = AesWrapper::new((&key[32..64]).into());
+    let xts = Xts128::<AesWrapper>::new(c1, c2);
+    
+    // Encrypt 448 bytes at offset 64.
+    let tweak = [0u8; 16];
+    xts.encrypt_area(&mut buffer[64..512], 448, 0, |_| tweak);
+    
+    // Write to file at offset 0
+    file.write_all(&buffer).map_err(|e| VolumeError::IoError(e))?;
+    
+    // Write to Backup Header
+    if size >= 131072 {
+         let backup_offset = size - 131072;
+         file.seek(SeekFrom::Start(backup_offset)).map_err(|e| VolumeError::IoError(e))?;
+         file.write_all(&buffer).map_err(|e| VolumeError::IoError(e))?;
+    }
     
     file.set_len(size).map_err(|e| VolumeError::IoError(e))?;
     

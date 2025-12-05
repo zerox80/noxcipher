@@ -61,10 +61,22 @@ impl DecryptedReader {
 
         // Calculate the byte offset of the sector.
         let offset = sector_index * self.sector_size;
-        // Seek to the sector offset in the underlying reader.
+        
+        // Seek to the sector offset in the underlying reader ONLY if needed.
+        // We track position manually to check, but since 'inner' is CallbackReader which tracks safely...
+        // Actually, we can just seek. CallbackReader seek is cheap (arithmetic).
+        // Optimization: avoid JNI overhead if position is already correct?
+        // But CallbackReader `seek` implementation is pure Rust arithmetic update of a u64 field.
+        // It DOES NOT call JNI. So `self.inner.seek` is very cheap.
+        // The issue reported was "inner reader... for every call".
+        // If `inner.seek` is cheap, then the optimization is less critical, but good practice.
         self.inner.seek(SeekFrom::Start(offset))?;
 
         // Read encrypted data into the buffer.
+        // Use read_exact but handle potential EOF if volume size is respected.
+        // However, AES-XTS requires full block (sector).
+        // If we can't read a full sector, we might fail or pad?
+        // VeraCrypt volumes are sector aligned.
         self.inner.read_exact(&mut self.sector_buffer)?;
 
         // Decrypt the data in-place using the volume's decrypt_sector method.
@@ -74,7 +86,6 @@ impl DecryptedReader {
 
         // Update the current sector index.
         self.current_sector_index = sector_index;
-        // Return success.
         Ok(())
     }
 }
@@ -82,39 +93,38 @@ impl DecryptedReader {
 // Implement Read trait for DecryptedReader.
 impl Read for DecryptedReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // If the output buffer is empty, return 0.
         if buf.is_empty() {
             return Ok(0);
         }
 
         // Get the current position in the stream.
+        // Optimization: Avoid `stream_position` which calls `seek(Current(0))`.
+        // We know we are `CallbackReader`, whose seek is cheap.
+        // But let's rely on `self.inner.stream_position()` being efficient enough or use correct seek logic.
         let current_pos = self.inner.stream_position()?;
-        // Calculate the sector index containing the current position.
+        
+        // Calculate sector index.
         let sector_index = current_pos / self.sector_size;
-        // Calculate the offset within that sector.
         let offset_in_sector = (current_pos % self.sector_size) as usize;
 
         // Ensure the correct sector is loaded and decrypted.
+        // Note: This seeks `inner` to sector start.
         self.read_sector(sector_index)?;
 
-        // Calculate how many bytes are available in the current sector from the current offset.
+        // Calculate available bytes in this sector.
         let available = self.sector_size as usize - offset_in_sector;
-        // Determine how many bytes to read (min of requested and available).
         let to_read = std::cmp::min(buf.len(), available);
 
-        // Copy the decrypted data to the output buffer.
-        buf[..to_read]
-            .copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
+        // Copy decrypted data.
+        buf[..to_read].copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
 
-        // Advance the underlying reader's position.
-        // Note: read_sector seeks to the start of the sector, so we need to restore/advance position.
-        // Actually, read_sector seeks to 'offset'. After read_exact, position is at end of sector.
-        // But we want to simulate a continuous stream.
-        // We update the position to reflect the bytes "read".
-        self.inner
-            .seek(SeekFrom::Start(current_pos + to_read as u64))?;
+        // Advance inner position properly.
+        // read_sector left inner at (sector_start + sector_size).
+        // We want it to be at (current_pos + to_read).
+        // So we MUST seek back.
+        // current_pos + to_read might be < sector_end.
+        self.inner.seek(SeekFrom::Start(current_pos + to_read as u64))?;
 
-        // Return the number of bytes read.
         Ok(to_read)
     }
 }
@@ -122,7 +132,6 @@ impl Read for DecryptedReader {
 // Implement Seek trait for DecryptedReader.
 impl Seek for DecryptedReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        // Delegate seek to the underlying reader.
         self.inner.seek(pos)
     }
 }
@@ -130,7 +139,7 @@ impl Seek for DecryptedReader {
 // Enum representing supported file systems.
 pub enum SupportedFileSystem {
     // NTFS file system wrapper.
-    Ntfs(DecryptedReader),
+    Ntfs(Box<Ntfs<DecryptedReader>>), // Cached NTFS instance (boxed to avoid large size on stack/enum)
     // ExFAT file system wrapper.
     ExFat(Vec<exfat::directory::Item<DecryptedReader>>),
 }
@@ -162,20 +171,23 @@ impl SupportedFileSystem {
 
         match self {
             // Handle NTFS file system.
-            SupportedFileSystem::Ntfs(reader) => {
+            SupportedFileSystem::Ntfs(ntfs) => {
+                // Get the underlying reader (mutable borrow from Ntfs struct? No, Ntfs owns it.)
+                // Ntfs struct allows access to its inner reader via `get_mut()`.
+                // Accessing root directory requires mutable access to reader.
+                let reader = ntfs.get_mut();
                 reader.seek(SeekFrom::Start(0))?;
-                let ntfs = Ntfs::new(&mut *reader)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
                 // Start at the root directory.
                 let mut current_dir = ntfs
-                    .root_directory(&mut *reader)
+                    .root_directory(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
                 // Traverse the directory structure based on path components.
                 for component in components {
                     // Get the index of the current directory.
                     let index = current_dir
-                        .directory_index(&mut *reader)
+                        .directory_index(reader)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     let mut found = false;
                     // Iterate through entries in the directory.
@@ -187,7 +199,7 @@ impl SupportedFileSystem {
                         if let Some(key) = key {
                             if key.name().to_string_lossy() == component && key.is_directory() {
                                 let id = entry.file_reference().file_record_number();
-                                current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                current_dir = ntfs.file(reader, id).map_err(|e| {
                                     io::Error::new(io::ErrorKind::Other, e.to_string())
                                 })?;
                                 found = true;
@@ -203,12 +215,12 @@ impl SupportedFileSystem {
 
                 // We are now at the target directory. Get its index.
                 let index = current_dir
-                    .directory_index(&mut *reader)
+                    .directory_index(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let mut results = Vec::new();
                 // Iterate through entries to collect file info.
                 let mut entries = index.entries();
-                while let Some(entry_res) = entries.next(&mut *reader) {
+                while let Some(entry_res) = entries.next(reader) {
                     // Handle individual entry errors without failing the whole listing
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = match entry_res {
                         Ok(e) => e,
@@ -336,28 +348,28 @@ impl SupportedFileSystem {
 
         match self {
             // Handle NTFS file system.
-            SupportedFileSystem::Ntfs(reader) => {
+            SupportedFileSystem::Ntfs(ntfs) => {
+                let reader = ntfs.get_mut();
                 reader.seek(SeekFrom::Start(0))?;
-                let ntfs = Ntfs::new(&mut *reader)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                
                 // Start at root.
                 let mut current_dir = ntfs
-                    .root_directory(&mut *reader)
+                    .root_directory(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 // Traverse directories.
                 for component in dir_components {
                     let index = current_dir
-                        .directory_index(&mut *reader)
+                        .directory_index(reader)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     let mut found = false;
                     let mut entries = index.entries();
-                    while let Some(entry) = entries.next(&mut *reader) {
+                    while let Some(entry) = entries.next(reader) {
                         let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
                         let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
                         if let Some(key) = key {
                             if key.name().to_string_lossy() == *component && key.is_directory() {
                                 let id = entry.file_reference().file_record_number();
-                                current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                current_dir = ntfs.file(reader, id).map_err(|e| {
                                     io::Error::new(io::ErrorKind::Other, e.to_string())
                                 })?;
                                 found = true;
@@ -372,10 +384,10 @@ impl SupportedFileSystem {
 
                 // Look for the file in the final directory.
                 let index = current_dir
-                    .directory_index(&mut *reader)
+                    .directory_index(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let mut entries = index.entries();
-                while let Some(entry) = entries.next(&mut *reader) {
+                while let Some(entry) = entries.next(reader) {
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
                     let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
                     if let Some(key) = key {
@@ -384,21 +396,21 @@ impl SupportedFileSystem {
                             // Convert entry to file.
                             let id = entry.file_reference().file_record_number();
                             let file = ntfs
-                                .file(&mut *reader, id)
+                                .file(reader, id)
                                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             // Get data attribute (content).
-                            let data = file.data(&mut *reader, "");
+                            let data = file.data(reader, "");
                             if let Some(attr_res) = data {
                                 let attr_item = attr_res
                                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                                 let attr = attr_item.to_attribute().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                                 let mut value = attr
-                                    .value(&mut *reader)
+                                    .value(reader)
                                     .map_err(|e: ntfs::NtfsError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                                 // Seek to the requested offset.
-                                value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                value.seek(reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                                 // Read data into buffer.
-                                return value.read(&mut *reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+                                return value.read(reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
                             }
                         }
                     }

@@ -46,7 +46,7 @@ lazy_static! {
     // Define a static global variable named LOG_BUFFER.
     // It is a Mutex-protected vector of Strings to store log messages safely across threads.
     // Initialize it with a new, empty Mutex containing an empty Vector.
-    static ref LOG_BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref LOG_BUFFER: Mutex<std::collections::VecDeque<String>> = Mutex::new(std::collections::VecDeque::new());
     // Define a static global variable named FILESYSTEMS.
     // It is a RwLock-protected HashMap mapping i64 handles to Arc<Mutex<SupportedFileSystem>>.
     // This allows concurrent access to the map (read) while specific filesystems are locked individually.
@@ -73,13 +73,10 @@ impl log::Log for InMemoryLogger {
         // Check if logging is enabled for this record's metadata.
         if self.enabled(record.metadata()) {
             // Format the log message with the level and the message arguments.
-            let log_msg = format!("{}: {}", record.level(), record.args());
 
             // The following lines create CStrings for Android logging but are currently unused variables (prefixed with _).
             // Create a CString for the tag "RustNative".
-            let _tag = std::ffi::CString::new("RustNative").unwrap();
             // Create a CString for the log message.
-            let _msg = std::ffi::CString::new(log_msg.clone()).unwrap();
             // The comments explain that simple Android logging via FFI is possible but not implemented here.
             // We are prioritizing the in-memory buffer for the user to retrieve logs.
 
@@ -88,10 +85,9 @@ impl log::Log for InMemoryLogger {
                 // Check if the buffer size exceeds 100 entries.
                 if buffer.len() > 100 {
                     // Remove the oldest log entry (at index 0) to maintain a fixed size.
-                    buffer.remove(0);
+                    buffer.pop_front();
                 }
                 // Push the new log message into the buffer.
-                buffer.push(log_msg);
             }
         }
     }
@@ -708,12 +704,31 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         // Clone the decrypted reader for the NTFS attempt.
         let mut reader_clone = decrypted_reader.clone();
         // Attempt to create a new Ntfs instance.
-        // Attempt to create a new Ntfs instance.
-        if Ntfs::new(&mut reader_clone).is_ok() {
-            // Log success.
-            log::info!("Mounted NTFS");
+        // Try mounting as NTFS.
+        if let Ok(ntfs_instance) = Ntfs::new(decrypted_reader.clone()) {
+            // Wait, Ntfs::new takes `&mut T`.
+            // We want to OWN the reader in the stored Ntfs instance.
+            // But `Ntfs::new` takes `R` (reader) by value? No, `&mut R` usually for methods.
+            // Let's check `filesystem.rs` usage: `Ntfs::new(&mut *reader)`.
+            // Wait, does `Ntfs` TAKE ownership? `pub struct Ntfs<R> { ... }`.
+            // `Ntfs::new(reader: R)`.
+            // In `filesystem.rs` previously:
+            // `match self { SupportedFileSystem::Ntfs(reader) => { ... Ntfs::new(&mut *reader) ... } }`
+            // This suggests `Ntfs` constructor might take `R` or `&mut R`.
+            // If it takes `&mut R`, then `Ntfs` struct holds a reference? That would be impossible for `SupportedFileSystem` enum to hold.
+            // So `Ntfs` MUST take `R` by value to own it.
+            // `ntfs` crate `Ntfs::new` typically takes `R`.
+            // Why did `filesystem.rs` use `&mut *reader`?
+            // `reader` was `DecryptedReader`. `&mut *reader` is `&mut DecryptedReader`.
+            // If `Ntfs::new` takes `R`, and we pass `&mut DecryptedReader`, then `R` is inferred as `&mut DecryptedReader`.
+            // This works for temporary usage.
+            // BUT if we want to STORE `Ntfs<DecryptedReader>`, we must pass `DecryptedReader` by value.
+            
+            // So:
+            // Or better:
+            
             // Lock the FILESYSTEMS map for writing.
-            // Using unwrap_or_else to handle poisoning gracefully (we want to insert anyway).
+            // Using unwrap_or_else to handle poisoned mutex gracefully
             let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
             
             // Lock the NEXT_FS_HANDLE counter.
@@ -723,7 +738,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
                 // Increment the handle counter.
                 *handle_lock += 1;
                 // Insert the NTFS reader into the map with the new handle wrapped in Arc<Mutex>.
-                lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(reader_clone))));
+                lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(Box::new(ntfs_instance)))));
                 // Return the handle.
                 return handle;
             }
@@ -810,7 +825,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
                  }
             } else {
                 // If not found, return an empty vector.
-                Vec::new()
+                std::collections::VecDeque::new()
             }
         };
 
@@ -918,7 +933,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
             .unwrap_or_default();
 
         // Access the file system.
-        if let Ok(mut lock) = FILESYSTEMS.lock() {
+        if let Ok(mut lock) = FILESYSTEMS.read() {
              // Look up the file system by handle.
             if let Some(fs) = lock.get_mut(&fs_handle) {
                 // Convert the raw JByteArray buffer to a JByteArray object unsafely.
@@ -984,7 +999,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
 ) {
     // Wrap execution in panic::catch_unwind.
     let _ = std::panic::catch_unwind(|| {
-        if let Ok(mut lock) = FILESYSTEMS.lock() {
+        if let Ok(mut lock) = FILESYSTEMS.write() {
             lock.remove(&handle);
         }
     });

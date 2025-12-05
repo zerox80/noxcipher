@@ -1,4 +1,4 @@
-// Import standard I/O traits.
+ // Import standard I/O traits.
 use std::io::{self, Read, Seek, SeekFrom};
 // Import JNI types.
 use jni::objects::{GlobalRef, JValue};
@@ -69,33 +69,45 @@ impl Read for CallbackReader {
 
         // Check for null (EOF or error).
         if byte_array.is_null() {
-            return Ok(0); // EOF or error
+            return Ok(0);
         }
 
-        // Convert Java byte array to Rust Vec<u8>.
-        let ba: jni::objects::JByteArray = byte_array.into();
-        let bytes = env.convert_byte_array(&ba).map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("JNI array conversion failed: {}", e))
-        })?;
+        // Wrap the JObject (array)
+        let ba_obj = unsafe { jni::objects::JByteArray::from_raw(byte_array.into_raw()) };
+
+        // Get the length of the array returned by Java.
+        let read_len = env.get_array_length(&ba_obj).map_err(|e| {
+             io::Error::new(io::ErrorKind::Other, format!("JNI array length error: {}", e))
+        })? as usize;
 
         // Check if returned data fits in buffer.
-        let read_len = bytes.len();
+        // If Java returns more than we asked, it's a protocol violation or buffer overflow risk.
         if read_len > buf.len() {
-            // Need to handle this or clean up
-            let mut bytes = bytes;
-            bytes.zeroize();
-            return Err(io::Error::new(
+             // We can't copy everything. Error out.
+             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Java returned more bytes than requested",
             ));
         }
 
-        // Copy data to buffer.
-        buf[..read_len].copy_from_slice(&bytes);
+        // Get the bytes directly into our buffer using generic JNI interface (if available in this version)
+        // or get_byte_array_region.
+        // We need a mutable slice of `i8` or `u8` depending on JNI crate version?
+        // `get_byte_array_region` takes `&mut [i8]` usually?
+        // Let's check `lib.rs` usage: `env.get_byte_array_region(&data_obj, 0, buf_slice)` where `buf_slice` is `&mut [i8]`.
+        // So we need to cast `buf` to `&mut [i8]`.
+        // This is safe because `u8` and `i8` have same layout.
         
-        // Zeroize the intermediate buffer.
-        let mut bytes = bytes;
-        bytes.zeroize();
+        let buf_slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, read_len)
+        };
+
+        env.get_byte_array_region(&ba_obj, 0, buf_slice).map_err(|e| {
+             io::Error::new(io::ErrorKind::Other, format!("JNI copy failed: {}", e))
+        })?;
+
+        // Zeroize isn't needed for `buf` here (it's the output buffer, caller handles it).
+        // But we avoided the intermediate `Vec<u8>`.
 
         // Update position.
         self.position += read_len as u64;
