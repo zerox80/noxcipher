@@ -193,6 +193,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     protection_password: jbyteArray,
     // The protection PIM value.
     protection_pim: jni::sys::jint,
+    // The total volume size (for safety checks).
+    volume_size: jlong,
 ) -> jlong {
     // Wrap the entire execution in panic::catch_unwind to handle panics gracefully.
     // AssertUnwindSafe is used because we are sharing references across the boundary.
@@ -266,6 +268,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             partition_offset as u64,
             protection_password_bytes.as_deref(),
             protection_pim,
+            volume_size as u64,
         );
 
         // Import the Zeroize trait to securely clear memory.
@@ -560,13 +563,16 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         // Retrieve the volume context associated with the handle.
         let volume = {
             // Lock the global CONTEXTS map.
-            let contexts = volume::CONTEXTS.lock().unwrap();
-            // Look up the handle.
-            match contexts.get(&volume_handle) {
-                // If found, clone the volume context.
-                Some(v) => v.clone(),
-                // If not found, return -1.
-                None => return -1,
+            if let Ok(contexts) = volume::CONTEXTS.lock() {
+                // Look up the handle.
+                match contexts.get(&volume_handle) {
+                    // If found, clone the volume context.
+                    Some(v) => v.clone(),
+                    // If not found, return -1.
+                    None => return -1,
+                }
+            } else {
+                 return -1;
             }
         };
 
@@ -577,7 +583,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         // Expect success.
         let callback_global = env
             .new_global_ref(callback_obj)
-            .expect("Failed to create global ref");
+            .map_err(|e| format!("Failed to create global ref: {}", e))
+            .expect("Global ref creation failed"); // We can expect here because we are in catch_unwind
+
         // Create a new CallbackReader with the JVM, callback object, and volume size.
         let reader = CallbackReader::new(jvm, callback_global, volume_size as u64);
         // Create a DecryptedReader that wraps the CallbackReader and the volume context.
@@ -593,17 +601,20 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
             // Log success.
             log::info!("Mounted NTFS");
             // Lock the FILESYSTEMS map.
-            let mut lock = FILESYSTEMS.lock().unwrap();
-            // Lock the NEXT_FS_HANDLE counter.
-            let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
-            // Get the current handle value.
-            let handle = *handle_lock;
-            // Increment the handle counter.
-            *handle_lock += 1;
-            // Insert the NTFS reader into the map with the new handle.
-            lock.insert(handle, SupportedFileSystem::Ntfs(reader_clone));
-            // Return the handle.
-            return handle;
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                // Lock the NEXT_FS_HANDLE counter.
+                if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
+                    // Get the current handle value.
+                    let handle = *handle_lock;
+                    // Increment the handle counter.
+                    *handle_lock += 1;
+                    // Insert the NTFS reader into the map with the new handle.
+                    lock.insert(handle, SupportedFileSystem::Ntfs(reader_clone));
+                    // Return the handle.
+                    return handle;
+                }
+            }
+            return -1;
         }
 
         // Try mounting as exFAT.
@@ -614,19 +625,21 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
             // Log success.
             log::info!("Mounted exFAT");
             // Lock the FILESYSTEMS map.
-            let mut lock = FILESYSTEMS.lock().unwrap();
-            // Lock the NEXT_FS_HANDLE counter.
-            let mut handle_lock = NEXT_FS_HANDLE.lock().unwrap();
-            // Get the current handle value.
-            let handle = *handle_lock;
-            // Increment the handle counter.
-            *handle_lock += 1;
-            // Insert the exFAT instance into the map with the new handle.
-            // Insert the exFAT instance into the map with the new handle.
-            let items: Vec<_> = exfat.into_iter().collect();
-            lock.insert(handle, SupportedFileSystem::ExFat(items));
-            // Return the handle.
-            return handle;
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                // Lock the NEXT_FS_HANDLE counter.
+                if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
+                    // Get the current handle value.
+                    let handle = *handle_lock;
+                    // Increment the handle counter.
+                    *handle_lock += 1;
+                    // Insert the exFAT instance into the map with the new handle.
+                    let items: Vec<_> = exfat.into_iter().collect();
+                    lock.insert(handle, SupportedFileSystem::ExFat(items));
+                    // Return the handle.
+                    return handle;
+                }
+            }
+            return -1;
         }
 
         // Log a warning if neither NTFS nor exFAT could be mounted.

@@ -80,7 +80,7 @@ pub struct Volume {
     // The parsed volume header.
     header: VolumeHeader,
     // The cipher used for encryption/decryption. Skipped for zeroization as it might contain non-zeroizable types or is handled separately.
-    #[zeroize(skip)]
+    // The cipher used for encryption/decryption.
     cipher: SupportedCipher,
     // The offset where the partition starts.
     partition_start_offset: u64,
@@ -173,12 +173,20 @@ impl Volume {
                 // unitNo = startUnitNo + i
                 // startUnitNo = (partition_start_offset + encrypted_area_start + current_sector * sector_size) / 512
                 // Calculate the starting unit number for the current sector.
-                let start_unit_no = (self.partition_start_offset
-                    + self.header.encrypted_area_start
-                    + current_sector * sector_size as u64)
-                    / 512;
-                // Calculate the specific unit number for this 512-byte block.
-                let unit_no = start_unit_no + i as u64;
+                // Calculate unit number (tweak) carefully using checked arithmetic
+                // unitNo = startUnitNo + i
+                // startUnitNo = (partition_start_offset + encrypted_area_start + current_sector * sector_size) / 512
+                
+                let sector_offset = current_sector.checked_mul(sector_size as u64)
+                    .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
+                
+                let abs_offset = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
+                    .and_then(|sum| sum.checked_add(sector_offset))
+                    .ok_or(VolumeError::CryptoError("Absolute offset overflow".to_string()))?;
+                
+                let start_unit_no = abs_offset / 512;
+                let unit_no = start_unit_no.checked_add(i as u64)
+                    .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
 
                 // Decrypt the 512-byte area using the cipher.
                 self.cipher.decrypt_area(
@@ -259,11 +267,17 @@ impl Volume {
                 let unit_data_offset = offset + unit_offset;
 
                 // Calculate unit number (tweak).
-                let start_unit_no = (self.partition_start_offset
-                    + self.header.encrypted_area_start
-                    + current_sector * sector_size as u64)
-                    / 512;
-                let unit_no = start_unit_no + i as u64;
+                // Calculate unit number (tweak) with overflow protection.
+                let sector_offset = current_sector.checked_mul(sector_size as u64)
+                    .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
+
+                let abs_offset = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
+                    .and_then(|sum| sum.checked_add(sector_offset))
+                    .ok_or(VolumeError::CryptoError("Absolute offset overflow".to_string()))?;
+
+                let start_unit_no = abs_offset / 512;
+                let unit_no = start_unit_no.checked_add(i as u64)
+                    .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
 
                 // Encrypt the area.
                 self.cipher.encrypt_area(
@@ -297,84 +311,64 @@ pub fn create_context(
     partition_start_offset: u64,
     protection_password: Option<&[u8]>,
     protection_pim: i32,
+    volume_size: u64,
 ) -> Result<i64, VolumeError> {
-    // Try Standard Header at offset 0
+    // 1. Try Standard Header at offset 0
+    let mut attempt_errors = Vec::new();
+    
     // Attempt to decrypt the header at the beginning of the buffer.
-    if let Ok(mut vol) =
-        try_header_at_offset(password, header_bytes, pim, 0, partition_start_offset)
-    {
-        // If protection is requested, try to mount hidden volume
-        if let Some(prot_pass) = protection_password {
-            // Check if buffer is large enough for hidden volume header (at 64KB).
-            if header_bytes.len() >= 65536 + 512 {
-                // Attempt to decrypt the hidden volume header.
-                match try_header_at_offset(
-                    prot_pass,
-                    header_bytes,
-                    protection_pim,
-                    65536,
-                    partition_start_offset,
-                ) {
-                    Ok(hidden_vol) => {
-                        // Log success.
-                        log::info!("Hidden Volume Protection Enabled");
-                        // Calculate protected range
-                        // Hidden volume is at the end of the outer volume?
-                        // No, hidden volume is within the outer volume.
-                        // We need to protect the area occupied by the hidden volume.
-                        // The hidden volume header is at 65536.
-                        // The hidden volume data starts at `hidden_vol.header.encrypted_area_start`?
-                        // Actually, for hidden volume, `encrypted_area_start` is the offset relative to the start of the *host* volume (outer volume).
-                        // So we protect from `encrypted_area_start` to `encrypted_area_start + encrypted_area_length`.
-
-                        // Get start of protected area.
-                        let start = hidden_vol.header.encrypted_area_start;
-                        // Get end of protected area.
-                        let end = start + hidden_vol.header.volume_data_size;
-                        // Set protection on the outer volume.
-                        vol.set_protection(start, end);
+    match try_header_at_offset(password, header_bytes, pim, 0, partition_start_offset) {
+        Ok(mut vol) => {
+             // If protection is requested, try to mount hidden volume
+            if let Some(prot_pass) = protection_password {
+                // Check if buffer is large enough for hidden volume header (at 64KB).
+                if header_bytes.len() >= 65536 + 512 {
+                    // Attempt to decrypt the hidden volume header.
+                    match try_header_at_offset(
+                        prot_pass,
+                        header_bytes,
+                        protection_pim,
+                        65536,
+                        partition_start_offset,
+                    ) {
+                        Ok(hidden_vol) => {
+                            log::info!("Hidden Volume Protection Enabled");
+                            let start = hidden_vol.header.encrypted_area_start;
+                            // Check overflow for end
+                            let end = start.checked_add(hidden_vol.header.volume_data_size)
+                                .ok_or(VolumeError::CryptoError("Hidden volume size overflow".to_string()))?;
+                            vol.set_protection(start, end);
+                        }
+                        Err(_) => {
+                            return Err(VolumeError::CryptoError(
+                                "Failed to mount hidden volume for protection".to_string(),
+                            ));
+                        }
                     }
-                    Err(_) => {
-                        // If protection password provided but failed to mount hidden volume, fail the whole operation?
-                        // VeraCrypt behavior: "Incorrect protection password" or similar.
-                        // Return error if hidden volume mount fails.
-                        return Err(VolumeError::CryptoError(
-                            "Failed to mount hidden volume for protection".to_string(),
-                        ));
-                    }
+                } else {
+                    return Err(VolumeError::CryptoError(
+                        "Buffer too small for hidden volume check".to_string(),
+                    ));
                 }
-            } else {
-                // Return error if buffer is too small.
-                return Err(VolumeError::CryptoError(
-                    "Buffer too small for hidden volume check".to_string(),
-                ));
             }
-        }
-        // Register the volume context and return the handle.
-        return register_context(vol);
+            return register_context(vol);
+        },
+        Err(e) => attempt_errors.push(format!("Primary: {}", e)),
     }
 
-    // Try Hidden Volume Header at offset 65536 (64KB)
+    // 2. Try Hidden Volume Header at offset 65536 (64KB)
     // Only if NOT protecting (if protecting, we expect outer volume at 0)
     if protection_password.is_none() && header_bytes.len() >= 65536 + 512 {
         // Attempt to decrypt header at 64KB offset.
         if let Ok(vol) =
             try_header_at_offset(password, header_bytes, pim, 65536, partition_start_offset)
         {
-            // Log success.
             log::info!("Mounted Hidden Volume");
-            // Register context.
             return register_context(vol);
         }
     }
 
-    // Return InvalidPassword if all attempts fail.
-    // We should probably capture the debug info from the last attempt?
-    // But try_header_at_offset tries MANY combinations.
-    // It returns InvalidPassword if NONE work.
-    // We need to propagate the debug info from try_header_at_offset.
-    
-    Err(VolumeError::InvalidPassword("All attempts failed".to_string()))
+    Err(VolumeError::InvalidPassword(format!("All attempts failed. Errors: {:?}", attempt_errors)))
 }
 
 // Renamed helper to return Volume

@@ -335,7 +335,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         val hexPwd = pwd.joinToString("") { "%02X".format(it) }
                                         _logs.emit("Pass Hex: $hexPwd")
 
-                                        handle = RustNative.init(pwd, headerBytes, pim, partitionOffset, protectionPassword, protectionPim)
+                                        handle = RustNative.init(pwd, headerBytes, pim, partitionOffset, protectionPassword, protectionPim, volSize)
                                         if (handle != null && handle > 0) {
                                             lastError = "Success ($type)"
                                             _logs.emit("Volume mounted successfully!")

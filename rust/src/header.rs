@@ -17,15 +17,19 @@ pub enum HeaderError {
     // Error variant indicating that the magic bytes ("VERA" or "TRUE") were not found in the header.
     InvalidMagic,
     // Error variant indicating that the calculated CRC32 checksum does not match the stored checksum.
-    InvalidCrc,
+    InvalidHeaderCrc { expected: u32, calculated: u32 },
     // Error variant indicating that the header version is not supported by this implementation.
-    UnsupportedVersion,
+    UnsupportedVersion(u16),
     // Error variant indicating that the minimum program version required by the volume is higher than supported.
-    UnsupportedProgramVersion,
+    UnsupportedProgramVersion(u16),
     // Error variant indicating that the sector size specified in the header is invalid.
-    InvalidSectorSize,
+    InvalidSectorSize(u32),
     // Error variant indicating that the key size is invalid.
     InvalidKeySize,
+    // Error variant indicating data too short
+    DataTooShort(usize),
+    // Error variant indicating Key Area CRC mismatch
+    InvalidKeyAreaCrc { expected: u32, calculated: u32 },
 }
 
 // Implement the fmt::Display trait for HeaderError to provide user-friendly error messages.
@@ -35,17 +39,19 @@ impl fmt::Display for HeaderError {
         // Match on the error variant (self) to determine the message string.
         match self {
             // For InvalidMagic, write "Invalid Magic 'VERA'" to the formatter.
-            HeaderError::InvalidMagic => write!(f, "Invalid Magic 'VERA'"),
+            HeaderError::InvalidMagic => write!(f, "Invalid Magic (Expected VERA or TRUE)"),
             // For InvalidCrc, write "Header CRC mismatch" to the formatter.
-            HeaderError::InvalidCrc => write!(f, "Header CRC mismatch"),
+            HeaderError::InvalidHeaderCrc { expected, calculated } => write!(f, "Header CRC mismatch: expected {:#010x}, calculated {:#010x}", expected, calculated),
             // For UnsupportedVersion, write "Unsupported Header Version" to the formatter.
-            HeaderError::UnsupportedVersion => write!(f, "Unsupported Header Version"),
+            HeaderError::UnsupportedVersion(v) => write!(f, "Unsupported Header Version: {}", v),
             // For UnsupportedProgramVersion, write "Unsupported Min Program Version" to the formatter.
-            HeaderError::UnsupportedProgramVersion => write!(f, "Unsupported Min Program Version"),
+            HeaderError::UnsupportedProgramVersion(v) => write!(f, "Unsupported Min Program Version: {:#x}", v),
             // For InvalidSectorSize, write "Invalid Sector Size" to the formatter.
-            HeaderError::InvalidSectorSize => write!(f, "Invalid Sector Size"),
+            HeaderError::InvalidSectorSize(s) => write!(f, "Invalid Sector Size: {}", s),
             // For InvalidKeySize, write "Invalid Key Size" to the formatter.
             HeaderError::InvalidKeySize => write!(f, "Invalid Key Size"),
+            HeaderError::DataTooShort(l) => write!(f, "Header data too short: {} bytes", l),
+            HeaderError::InvalidKeyAreaCrc { expected, calculated } => write!(f, "Key Area CRC mismatch: expected {:#010x}, calculated {:#010x}", expected, calculated),
         }
     }
 }
@@ -98,8 +104,8 @@ impl VolumeHeader {
         // Check if the decrypted data is large enough to contain a valid header.
         // A valid header must be at least 448 bytes (512 bytes total - 64 bytes salt).
         if decrypted.len() < 448 {
-            // If the data is too short, return an InvalidMagic error.
-            return Err(HeaderError::InvalidMagic);
+            // If the data is too short, return an error.
+            return Err(HeaderError::DataTooShort(decrypted.len()));
         }
 
         // Extract the first 4 bytes to check the magic signature.
@@ -115,7 +121,7 @@ impl VolumeHeader {
         // Verify that the version is at least 1.
         if version < 1 {
             // If the version is less than 1, return an UnsupportedVersion error.
-            return Err(HeaderError::UnsupportedVersion);
+            return Err(HeaderError::UnsupportedVersion(version));
         }
 
         // Check the Header CRC. The CRC check is only mandatory for version 4 and above.
@@ -130,7 +136,7 @@ impl VolumeHeader {
             // Compare the stored CRC with the calculated CRC.
             if header_crc_stored != header_crc_calc {
                 // If they don't match, return an InvalidCrc error.
-                return Err(HeaderError::InvalidCrc);
+                return Err(HeaderError::InvalidHeaderCrc { expected: header_crc_stored, calculated: header_crc_calc });
             }
         }
 
@@ -145,7 +151,7 @@ impl VolumeHeader {
         // 0x011a corresponds to version 1.26.
         if min_program_version > 0x011a {
             // If the required version is greater than supported, return UnsupportedProgramVersion error.
-            return Err(HeaderError::UnsupportedProgramVersion);
+            return Err(HeaderError::UnsupportedProgramVersion(min_program_version));
         }
 
         // Read the key area CRC32 (4 bytes) from offset 8.
@@ -177,7 +183,7 @@ impl VolumeHeader {
         // VeraCrypt supports sector sizes: 512, 1024, 2048, 4096.
         if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 {
             // If validation fails, return an InvalidSectorSize error.
-            return Err(HeaderError::InvalidSectorSize);
+            return Err(HeaderError::InvalidSectorSize(sector_size));
         }
 
         // Validate the Key Area CRC.
@@ -188,7 +194,7 @@ impl VolumeHeader {
         if key_area_crc32 != key_area_crc_calc {
             // If they don't match, return an InvalidCrc error.
             // This indicates potential corruption of the master keys.
-            return Err(HeaderError::InvalidCrc);
+            return Err(HeaderError::InvalidKeyAreaCrc { expected: key_area_crc32, calculated: key_area_crc_calc });
         }
 
         // Initialize a 256-byte array for the master key data, filled with zeros.

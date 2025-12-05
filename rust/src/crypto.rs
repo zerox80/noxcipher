@@ -34,7 +34,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // It wraps the inner kuznyechik::Kuznyechik struct.
 // Derive Zeroize and ZeroizeOnDrop to ensure the inner cipher state is wiped when dropped.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct KuznyechikWrapper(#[zeroize(skip)] kuznyechik::Kuznyechik);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct KuznyechikWrapper(kuznyechik::Kuznyechik);
 
 // Implement the KeySizeUser trait for KuznyechikWrapper.
 // This defines the key size for the cipher.
@@ -140,7 +141,8 @@ impl BlockDecrypt for KuznyechikWrapper {
 // It wraps the inner camellia::Camellia256 struct.
 // Derive Zeroize and ZeroizeOnDrop for security.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct CamelliaWrapper(#[zeroize(skip)] camellia::Camellia256);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct CamelliaWrapper(camellia::Camellia256);
 
 // Implement KeySizeUser for CamelliaWrapper.
 impl KeySizeUser for CamelliaWrapper {
@@ -235,7 +237,8 @@ impl BlockDecrypt for CamelliaWrapper {
 // --- Wrappers for other ciphers to ensure ZeroizeOnDrop ---
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct AesWrapper(#[zeroize(skip)] Aes256);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct AesWrapper(Aes256);
 
 impl KeySizeUser for AesWrapper {
     type KeySize = U32;
@@ -266,7 +269,8 @@ impl BlockDecrypt for AesWrapper {
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct SerpentWrapper(#[zeroize(skip)] Serpent);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct SerpentWrapper(Serpent);
 
 impl KeySizeUser for SerpentWrapper {
     type KeySize = U32;
@@ -297,7 +301,8 @@ impl BlockDecrypt for SerpentWrapper {
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct TwofishWrapper(#[zeroize(skip)] Twofish);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct TwofishWrapper(Twofish);
 
 impl KeySizeUser for TwofishWrapper {
     type KeySize = U32;
@@ -333,73 +338,73 @@ impl BlockDecrypt for TwofishWrapper {
 pub enum SupportedCipher {
     // Single cipher variants.
     // AES-256 in XTS mode.
-    Aes(#[zeroize(skip)] Xts128<AesWrapper>),
+    Aes(Xts128<AesWrapper>),
     // Serpent in XTS mode.
-    Serpent(#[zeroize(skip)] Xts128<SerpentWrapper>),
+    Serpent(Xts128<SerpentWrapper>),
     // Twofish in XTS mode.
-    Twofish(#[zeroize(skip)] Xts128<TwofishWrapper>),
+    Twofish(Xts128<TwofishWrapper>),
 
     // Cascade cipher variants (Order matters: Outer -> Inner).
     // AES then Twofish cascade.
     AesTwofish(
-        #[zeroize(skip)] Xts128<AesWrapper>,
-        #[zeroize(skip)] Xts128<TwofishWrapper>,
+        Xts128<AesWrapper>,
+        Xts128<TwofishWrapper>,
     ),
     // AES then Twofish then Serpent cascade.
     AesTwofishSerpent(
-        #[zeroize(skip)] Xts128<AesWrapper>,
-        #[zeroize(skip)] Xts128<TwofishWrapper>,
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
+        Xts128<AesWrapper>,
+        Xts128<TwofishWrapper>,
+        Xts128<SerpentWrapper>,
     ),
     // Serpent then AES cascade.
     SerpentAes(
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
-        #[zeroize(skip)] Xts128<AesWrapper>,
+        Xts128<SerpentWrapper>,
+        Xts128<AesWrapper>,
     ),
     // Twofish then Serpent cascade.
     TwofishSerpent(
-        #[zeroize(skip)] Xts128<TwofishWrapper>,
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
+        Xts128<TwofishWrapper>,
+        Xts128<SerpentWrapper>,
     ),
     // Serpent then Twofish then AES cascade.
     SerpentTwofishAes(
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
-        #[zeroize(skip)] Xts128<TwofishWrapper>,
-        #[zeroize(skip)] Xts128<AesWrapper>,
+        Xts128<SerpentWrapper>,
+        Xts128<TwofishWrapper>,
+        Xts128<AesWrapper>,
     ),
 
     // Other single ciphers.
     // Camellia in XTS mode.
-    Camellia(#[zeroize(skip)] Xts128<CamelliaWrapper>),
+    Camellia(Xts128<CamelliaWrapper>),
     // Kuznyechik in XTS mode.
-    Kuznyechik(#[zeroize(skip)] Xts128<KuznyechikWrapper>),
+    Kuznyechik(Xts128<KuznyechikWrapper>),
 
     // Other cascade variants.
     // Camellia then Kuznyechik cascade.
     CamelliaKuznyechik(
-        #[zeroize(skip)] Xts128<CamelliaWrapper>,
-        #[zeroize(skip)] Xts128<KuznyechikWrapper>,
+        Xts128<CamelliaWrapper>,
+        Xts128<KuznyechikWrapper>,
     ),
     // Camellia then Serpent cascade.
     CamelliaSerpent(
-        #[zeroize(skip)] Xts128<CamelliaWrapper>,
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
+        Xts128<CamelliaWrapper>,
+        Xts128<SerpentWrapper>,
     ),
     // Kuznyechik then AES cascade.
     KuznyechikAes(
-        #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<AesWrapper>,
+        Xts128<KuznyechikWrapper>,
+        Xts128<AesWrapper>,
     ),
     // Kuznyechik then Serpent then Camellia cascade.
     KuznyechikSerpentCamellia(
-        #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<SerpentWrapper>,
-        #[zeroize(skip)] Xts128<CamelliaWrapper>,
+        Xts128<KuznyechikWrapper>,
+        Xts128<SerpentWrapper>,
+        Xts128<CamelliaWrapper>,
     ),
     // Kuznyechik then Twofish cascade.
     KuznyechikTwofish(
-        #[zeroize(skip)] Xts128<KuznyechikWrapper>,
-        #[zeroize(skip)] Xts128<TwofishWrapper>,
+        Xts128<KuznyechikWrapper>,
+        Xts128<TwofishWrapper>,
     ),
 }
 

@@ -52,7 +52,8 @@ object RustNative {
         pim: Int, 
         partitionOffset: Long, 
         protectionPassword: ByteArray?, 
-        protectionPim: Int
+        protectionPim: Int,
+        volumeSize: Long
     ): Long
 
     /**
