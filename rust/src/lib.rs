@@ -203,13 +203,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
 ) {
     // Wrap execution in panic::catch_unwind.
     let _ = std::panic::catch_unwind(|| {
-        if let Ok(mut lock) = FILESYSTEMS.write() {
-            lock.remove(&handle);
-        } else if let Err(poisoned) = FILESYSTEMS.write() {
-             // If poisoned, we can still recover the lock to remove the item
-             let mut lock = poisoned.into_inner();
-             lock.remove(&handle);
-        }
+        // Use unwrap_or_else to handle poisoned mutex gracefully
+        let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
+        lock.remove(&handle);
     });
 }
 
@@ -627,6 +623,33 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
             let _ = env.throw_new("java/lang/RuntimeException", "Panic in getDataOffset");
             // Return -1.
             -1
+        }
+    }
+    }
+}
+
+// Define a JNI function named Java_com_noxcipher_RustNative_isBackupHeaderUsed.
+// It checks if the volume was mounted using the backup header.
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_isBackupHeaderUsed(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    let res = panic::catch_unwind(|| {
+        let contexts_lock = volume::CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(context) = contexts_lock.get(&handle) {
+            if context.used_backup_header { 1 } else { 0 }
+        } else {
+            0 // False or error (handle not found)
+        }
+    });
+
+    match res {
+        Ok(val) => val,
+        Err(_) => {
+            let _ = env.throw_new("java/lang/RuntimeException", "Panic in isBackupHeaderUsed");
+            0
         }
     }
 }

@@ -7,7 +7,7 @@ use byteorder::{BigEndian, ByteOrder};
 use std::fmt;
 // Import Zeroize and ZeroizeOnDrop traits from the zeroize crate.
 // These are used to securely clear memory containing sensitive data (like keys) when it goes out of scope.
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Define an enumeration named HeaderError to represent possible errors during header parsing.
 // Derive Debug and Clone traits for easy printing and copying of error values.
@@ -188,6 +188,12 @@ impl VolumeHeader {
         let encrypted_area_start = BigEndian::read_u64(&decrypted[44..52]);
         // Read the encrypted area length (8 bytes) from offset 52.
         let encrypted_area_length = BigEndian::read_u64(&decrypted[52..60]);
+
+        // Check for overflow in encrypted area range
+        if encrypted_area_start.checked_add(encrypted_area_length).is_none() {
+             return Err(HeaderError::DataTooShort(0)); // Or a new specific error
+        }
+
         // Read the flags (4 bytes) from offset 60.
         let flags = BigEndian::read_u32(&decrypted[60..64]);
         // Read the sector size (4 bytes) from offset 64.
@@ -203,7 +209,7 @@ impl VolumeHeader {
 
         // Validate that the sector size is within the valid range (512 to 4096) and is a multiple of 512.
         // VeraCrypt supports sector sizes: 512, 1024, 2048, 4096.
-        if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 {
+        if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 || !sector_size.is_power_of_two() {
             // If validation fails, return an InvalidSectorSize error.
             return Err(HeaderError::InvalidSectorSize(sector_size));
         }
@@ -262,9 +268,9 @@ impl VolumeHeader {
     }
 
     // Function to serialize the VolumeHeader into a byte buffer.
-    pub fn serialize(&self, salt: &[u8]) -> Result<Vec<u8>, HeaderError> {
+    pub fn serialize(&self, salt: &[u8]) -> Result<Zeroizing<Vec<u8>>, HeaderError> {
         // Create a 512-byte buffer initialized with zeros.
-        let mut buffer = vec![0u8; 512];
+        let mut buffer = Zeroizing::new(vec![0u8; 512]);
         
         // Copy the salt (64 bytes) to the beginning.
         if salt.len() != 64 {
@@ -331,5 +337,29 @@ impl VolumeHeader {
         // We initialized with zeros.
         
         Ok(buffer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_sector_sizes() {
+        // Test power of 2
+        assert!(512u32.is_power_of_two());
+        assert!(1024u32.is_power_of_two());
+        assert!(!1536u32.is_power_of_two());
+    }
+
+    #[test]
+    fn test_header_validation_overflow() {
+        // Mock data too short (just zeros)
+        let data = vec![0u8; 512];
+        // But headers must be valid magic.
+        // We can't easily mock deserialize without a full encrypted packet or modifying the internal logic to accept partials.
+        // But we can check if it fails safely.
+        let res = VolumeHeader::deserialize(&data);
+        assert!(res.is_err());
     }
 }

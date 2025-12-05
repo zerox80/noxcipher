@@ -34,7 +34,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // It wraps the inner kuznyechik::Kuznyechik struct.
 // Derive Zeroize and ZeroizeOnDrop to ensure the inner cipher state is wiped when dropped.
 #[derive(Zeroize, ZeroizeOnDrop)]
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct KuznyechikWrapper(kuznyechik::Kuznyechik);
 
 // Implement the KeySizeUser trait for KuznyechikWrapper.
@@ -141,7 +140,6 @@ impl BlockDecrypt for KuznyechikWrapper {
 // It wraps the inner camellia::Camellia256 struct.
 // Derive Zeroize and ZeroizeOnDrop for security.
 #[derive(Zeroize, ZeroizeOnDrop)]
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct CamelliaWrapper(camellia::Camellia256);
 
 // Implement KeySizeUser for CamelliaWrapper.
@@ -237,7 +235,6 @@ impl BlockDecrypt for CamelliaWrapper {
 // --- Wrappers for other ciphers to ensure ZeroizeOnDrop ---
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AesWrapper(Aes256);
 
 impl KeySizeUser for AesWrapper {
@@ -269,7 +266,6 @@ impl BlockDecrypt for AesWrapper {
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SerpentWrapper(Serpent);
 
 impl KeySizeUser for SerpentWrapper {
@@ -300,7 +296,6 @@ impl BlockDecrypt for SerpentWrapper {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct TwofishWrapper(Twofish);
 

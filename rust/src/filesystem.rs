@@ -156,8 +156,8 @@ impl SupportedFileSystem {
             // If path is empty, it's the root directory.
             Vec::new()
         } else {
-            // Split by forward slash.
-            path.split('/').collect()
+            // Split by forward slash and filter empty components.
+            path.split('/').filter(|s| !s.is_empty()).collect()
         };
 
         match self {
@@ -328,7 +328,7 @@ impl SupportedFileSystem {
             // Cannot read root as a file.
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty path"));
         } else {
-            path.split('/').collect()
+            path.split('/').filter(|s| !s.is_empty()).collect()
         };
 
         // Separate the file name from the directory path components.

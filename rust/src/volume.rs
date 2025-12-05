@@ -59,6 +59,13 @@ impl From<HeaderError> for VolumeError {
     }
 }
 
+// Implement conversion from std::io::Error to VolumeError.
+impl From<std::io::Error> for VolumeError {
+    fn from(e: std::io::Error) -> Self {
+        VolumeError::IoError(e)
+    }
+}
+
 // Implement Display trait for VolumeError to provide user-friendly messages.
 impl fmt::Display for VolumeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -71,6 +78,8 @@ impl fmt::Display for VolumeError {
             VolumeError::CryptoError(msg) => write!(f, "Crypto Error: {}", msg),
             // Write "Volume not initialized" for NotInitialized.
             VolumeError::NotInitialized => write!(f, "Volume not initialized"),
+            // Write "I/O Error: " followed by the error.
+            VolumeError::IoError(e) => write!(f, "I/O Error: {}", e),
         }
     }
 }
@@ -94,11 +103,16 @@ pub struct Volume {
     protected_range_start: u64,
     // End of the protected range.
     protected_range_end: u64,
+    // Flag indicating if the backup header was used.
+    pub used_backup_header: bool,
 }
 
 // Implement Send trait for Volume to allow it to be sent across threads.
 // This is unsafe because we are asserting it is safe to send.
 unsafe impl Send for Volume {}
+// Implement Sync trait for Volume to allow shared references across threads.
+// Required for Arc<Volume> to be used safely in multi-threaded contexts.
+unsafe impl Sync for Volume {}
 
 // Implementation block for Volume methods.
 impl Volume {
@@ -117,8 +131,10 @@ impl Volume {
             partition_start_offset,
             hidden_volume_offset,
             read_only,
+            read_only,
             protected_range_start: 0,
             protected_range_end: 0,
+            used_backup_header: false,
         }
     }
 
@@ -416,8 +432,9 @@ pub fn create_context(
                  // because the tweak 0 is hardcoded in `try_cipher` variants (seen in `try_cipher_serpent` etc).
                  
                  match try_header_at_offset(password, bh, pim, 0, partition_start_offset) {
-                     Ok(vol) => {
+                     Ok(mut vol) => {
                          log::info!("Mounted Backup Header");
+                         vol.used_backup_header = true;
                          return register_context(vol);
                      }
                      Err(_) => attempt_errors.push("Backup Header: Failed".to_string()),
@@ -439,6 +456,7 @@ pub fn create_context(
                         partition_start_offset
                     ) {
                         log::info!("Mounted Backup Header (Embedded)");
+                        vol.used_backup_header = true;
                         return register_context(vol);
                     } else {
                          attempt_errors.push("Backup Header (Embedded): Failed".to_string());
@@ -627,7 +645,7 @@ pub fn create_context(
         }
 
         // Return InvalidPassword if none work.
-        Err(VolumeError::InvalidPassword)
+        Err(VolumeError::InvalidPassword("No cipher matched".to_string()))
     };
 
     let mut last_debug = "None".to_string();
@@ -706,9 +724,11 @@ pub fn create_context(
         // If PIM is provided, we use the calculated iter (15000+...).
         // If PIM=0, we need to map 500,000 -> 655,331 and 200,000 -> 327,661.
         // Calculate specific iteration count for RIPEMD-160.
+        // Calculate specific iteration count for RIPEMD-160.
         let ripemd_iter = if pim > 0 {
-            // For RIPEMD-160, PIM formula is same as others? Yes.
-            15000 + (pim as u64 * 1000) as u32
+            // For RIPEMD-160, PIM formula is same as others.
+            // Use checked arithmetic to prevent overflow.
+            15000u32.checked_add((pim as u32).checked_mul(1000).unwrap_or(u32::MAX)).unwrap_or(u32::MAX)
         } else {
             // Map standard iteration counts to RIPEMD specific ones.
             if iter == 500_000 {
@@ -973,7 +993,7 @@ fn try_cipher_serpent(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Serpent cipher failed".to_string()))
 }
 
 // Function to try AES-Twofish cascade.
@@ -993,10 +1013,10 @@ fn try_cipher_aes_twofish(
     let key_aes_2 = &header_key[96..128];
 
     // Create XTS instances.
-    let cipher_aes = Xts128::new(Aes256::new(key_aes_1.into()), Aes256::new(key_aes_2.into()));
+    let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
     let cipher_twofish = Xts128::new(
-        Twofish::new(key_twofish_1.into()),
-        Twofish::new(key_twofish_2.into()),
+        TwofishWrapper::new(key_twofish_1.into()),
+        TwofishWrapper::new(key_twofish_2.into()),
     );
 
     // Wrap in SupportedCipher.
@@ -1043,7 +1063,7 @@ fn try_cipher_aes_twofish(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("AES-Twofish cipher failed".to_string()))
 }
 
 // Function to try AES-Twofish-Serpent cascade.
@@ -1120,7 +1140,7 @@ fn try_cipher_aes_twofish_serpent(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("AES-Twofish-Serpent cipher failed".to_string()))
 }
 
 // Function to try Serpent-AES cascade.
@@ -1183,7 +1203,7 @@ fn try_cipher_serpent_aes(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Serpent-AES cipher failed".to_string()))
 }
 
 // Function to try Twofish-Serpent cascade.
@@ -1252,7 +1272,7 @@ fn try_cipher_twofish_serpent(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Twofish-Serpent cipher failed".to_string()))
 }
 
 // Function to try Serpent-Twofish-AES cascade.
@@ -1328,7 +1348,7 @@ fn try_cipher_serpent_twofish_aes(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Serpent-Twofish-AES cipher failed".to_string()))
 }
 
 // Function to try Camellia cipher.
@@ -1441,7 +1461,7 @@ fn try_cipher_camellia_kuznyechik(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Camellia-Kuznyechik cipher failed".to_string()))
 }
 
 // Function to try Camellia-Serpent cascade.
@@ -1463,8 +1483,8 @@ fn try_cipher_camellia_serpent(
         CamelliaWrapper::new(key_camellia_2.into()),
     );
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
-        Serpent::new_from_slice(key_serpent_2).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
+        SerpentWrapper::new(key_serpent_1.into()),
+        SerpentWrapper::new(key_serpent_2.into()),
     );
 
     // Wrap in SupportedCipher.
@@ -1492,8 +1512,8 @@ fn try_cipher_camellia_serpent(
             CamelliaWrapper::new(mk_camellia_2.into()),
         );
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
-            Serpent::new_from_slice(mk_serpent_2).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
+            SerpentWrapper::new(mk_serpent_1.into()),
+            SerpentWrapper::new(mk_serpent_2.into()),
         );
 
         // Check vulnerability.
@@ -1510,7 +1530,7 @@ fn try_cipher_camellia_serpent(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Camellia-Serpent cipher failed".to_string()))
 }
 
 // Function to try Kuznyechik-AES cascade.
@@ -1573,7 +1593,7 @@ fn try_cipher_kuznyechik_aes(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Kuznyechik-AES cipher failed".to_string()))
 }
 
 // Function to try Kuznyechik-Serpent-Camellia cascade.
@@ -1659,7 +1679,7 @@ fn try_cipher_kuznyechik_serpent_camellia(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Kuznyechik-Serpent-Camellia cipher failed".to_string()))
 }
 
 // Function to try Kuznyechik-Twofish cascade.
@@ -1681,8 +1701,8 @@ fn try_cipher_kuznyechik_twofish(
         KuznyechikWrapper::new(key_kuznyechik_2.into()),
     );
     let cipher_twofish = Xts128::new(
-        Twofish::new(key_twofish_1.into()),
-        Twofish::new(key_twofish_2.into()),
+        TwofishWrapper::new(key_twofish_1.into()),
+        TwofishWrapper::new(key_twofish_2.into()),
     );
 
     // Wrap in SupportedCipher.
@@ -1710,8 +1730,8 @@ fn try_cipher_kuznyechik_twofish(
             KuznyechikWrapper::new(mk_kuznyechik_2.into()),
         );
         let vol_twofish = Xts128::new(
-            Twofish::new(mk_twofish_1.into()),
-            Twofish::new(mk_twofish_2.into()),
+            TwofishWrapper::new(mk_twofish_1.into()),
+            TwofishWrapper::new(mk_twofish_2.into()),
         );
 
         // Check vulnerability.
@@ -1728,7 +1748,7 @@ fn try_cipher_kuznyechik_twofish(
             false,
         ));
     }
-    Err(VolumeError::InvalidPassword)
+    Err(VolumeError::InvalidPassword("Kuznyechik-Twofish cipher failed".to_string()))
 }
 // Function to change the password of an existing volume.
 pub fn change_password(

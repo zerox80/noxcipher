@@ -127,7 +127,15 @@ impl Seek for CallbackReader {
                         .ok_or(io::Error::new(io::ErrorKind::Other, "Seek underflow"))?
                 }
             }
-            SeekFrom::Current(p) => (self.position as i64 + p) as u64,
+            SeekFrom::Current(p) => {
+                if p >= 0 {
+                    self.position.checked_add(p as u64)
+                        .ok_or(io::Error::new(io::ErrorKind::Other, "Seek overflow"))?
+                } else {
+                    self.position.checked_sub(p.unsigned_abs())
+                        .ok_or(io::Error::new(io::ErrorKind::Other, "Seek underflow"))?
+                }
+            }
         };
 
         // Update position.
