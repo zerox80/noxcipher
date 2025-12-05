@@ -53,7 +53,9 @@ object RustNative {
         partitionOffset: Long, 
         protectionPassword: ByteArray?, 
         protectionPim: Int,
-        volumeSize: Long
+        protectionPim: Int,
+        volumeSize: Long,
+        backupHeader: ByteArray?
     ): Long
 
     /**
@@ -117,4 +119,37 @@ object RustNative {
      * @param fsHandle The file system handle.
      */
     external fun closeFs(fsHandle: Long)
+    external fun closeFs(fsHandle: Long)
+
+    /**
+     * Changes the password/PIM of a volume.
+     * @param path The path of the volume.
+     * @param oldPassword The current password.
+     * @param oldPim The current PIM.
+     * @param newPassword The new password.
+     * @param newPim The new PIM.
+     * @return 0 on success, -1 on failure.
+     */
+    external fun changePassword(
+        path: String,
+        oldPassword: ByteArray,
+        oldPim: Int,
+        newPassword: ByteArray,
+        newPim: Int
+    ): Int
+
+    /**
+     * Formats a new volume.
+     * @param path The path to create the volume at.
+     * @param password The password.
+     * @param pim The PIM.
+     * @param volumeSize The size of the volume in bytes.
+     * @return 0 on success, -1 on failure.
+     */
+    external fun formatVolume(
+        path: String,
+        password: ByteArray,
+        pim: Int,
+        volumeSize: Long
+    ): Int
 }

@@ -230,13 +230,26 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     // The protection PIM value.
     protection_pim: jni::sys::jint,
     // The total volume size (for safety checks).
+    // The total volume size (for safety checks).
     volume_size: jlong,
+    // The backup header data as a byte array (optional).
+    backup_header: jbyteArray,
 ) -> jlong {
     // Wrap the entire execution in panic::catch_unwind to handle panics gracefully.
     // AssertUnwindSafe is used because we are sharing references across the boundary.
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Log that the init function has been called.
         log::info!("Rust init called");
+        
+        // Validate inputs are not null where required
+        if password.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Password cannot be null");
+             return -1;
+        }
+        if header.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Header cannot be null");
+             return -1;
+        }
 
         // Convert the raw JByteArray password to a JByteArray object unsafely.
         let password_obj = unsafe { JByteArray::from_raw(password) };
@@ -295,6 +308,20 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             None
         };
 
+        // Handle the optional backup header.
+        let mut backup_header_bytes = if !backup_header.is_null() {
+            let bh_obj = unsafe { JByteArray::from_raw(backup_header) };
+            match env.convert_byte_array(&bh_obj) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    log::warn!("Invalid backup header array: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if partition_offset < 0 {
             let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative partition offset");
             return -1;
@@ -310,6 +337,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             protection_password_bytes.as_deref(),
             protection_pim,
             volume_size as u64,
+            backup_header_bytes.as_deref(),
         );
 
         // Import the Zeroize trait to securely clear memory.
@@ -317,8 +345,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         // Zeroize the password bytes in memory.
         password_bytes.zeroize();
         // If protection password bytes exist, zeroize them as well.
+        // If protection password bytes exist, zeroize them as well.
         if let Some(ref mut pp) = protection_password_bytes {
             pp.zeroize();
+        }
+        // If backup header bytes exist, zeroize them (though not critical if just ciphertext, good practice).
+        if let Some(ref mut bh) = backup_header_bytes {
+            bh.zeroize();
         }
 
         // Match on the result of create_context.
@@ -915,3 +948,96 @@ pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
     });
 }
 
+// Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: jni::objects::JString,
+    old_password: jbyteArray,
+    old_pim: jni::sys::jint,
+    new_password: jbyteArray,
+    new_pim: jni::sys::jint,
+) -> jint {
+    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path_str: String = env.get_string(&path)
+            .map(|s| s.into())
+            .unwrap_or_default();
+            
+        let old_pwd_obj = unsafe { JByteArray::from_raw(old_password) };
+        let mut old_pwd_bytes = env.convert_byte_array(&old_pwd_obj).unwrap_or_default();
+        
+        let new_pwd_obj = unsafe { JByteArray::from_raw(new_password) };
+        let mut new_pwd_bytes = env.convert_byte_array(&new_pwd_obj).unwrap_or_default();
+        
+        let res = volume::change_password(
+             &path_str,
+             &old_pwd_bytes,
+             old_pim,
+             &new_pwd_bytes,
+             new_pim
+        );
+        
+        use zeroize::Zeroize;
+        old_pwd_bytes.zeroize();
+        new_pwd_bytes.zeroize();
+        
+        match res {
+            Ok(_) => 0,
+            Err(e) => {
+                log::error!("Change password failed: {:?}", e);
+                -1
+            }
+        }
+    }));
+    
+    match result {
+        Ok(code) => code,
+        Err(_) => -1,
+    }
+}
+
+// Define a JNI function named Java_com_noxcipher_RustNative_formatVolume.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: jni::objects::JString,
+    password: jbyteArray,
+    pim: jni::sys::jint,
+    volume_size: jlong,
+) -> jint {
+    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path_str: String = env.get_string(&path)
+            .map(|s| s.into())
+            .unwrap_or_default();
+            
+        let pwd_obj = unsafe { JByteArray::from_raw(password) };
+        let mut pwd_bytes = env.convert_byte_array(&pwd_obj).unwrap_or_default();
+        
+        let res = volume::create_volume(
+             &path_str,
+             &pwd_bytes,
+             pim,
+             volume_size as u64
+        );
+        
+        use zeroize::Zeroize;
+        pwd_bytes.zeroize();
+        
+        match res {
+            Ok(_) => 0,
+            Err(e) => {
+                log::error!("Format volume failed: {:?}", e);
+                -1
+            }
+        }
+    }));
+    
+    match result {
+        Ok(code) => code,
+        Err(_) => -1,
+    }
+}

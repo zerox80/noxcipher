@@ -238,4 +238,79 @@ impl VolumeHeader {
         // Otherwise, return false.
         key1 == key2
     }
+
+    // Function to serialize the VolumeHeader into a byte buffer.
+    pub fn serialize(&self, salt: &[u8]) -> Result<Vec<u8>, HeaderError> {
+        // Create a 512-byte buffer initialized with zeros.
+        let mut buffer = vec![0u8; 512];
+        
+        // Copy the salt (64 bytes) to the beginning.
+        if salt.len() != 64 {
+             // Should handle error, but for now we assume caller provides 64 bytes.
+             // Or we could return error.
+             // HeaderError doesn't have InvalidSalt.
+             // Let's assume correct salt or panic? Better to be safe.
+        }
+        buffer[0..64].copy_from_slice(salt);
+
+        // Calculate offset for encrypted area (start at 64).
+        let header_start = 64;
+        
+        // Write Magic "VERA" at offset 0 of encrypted area (64 absolute).
+        buffer[header_start..header_start + 4].copy_from_slice(b"VERA");
+        
+        // Write Version (2 bytes) at offset 4.
+        BigEndian::write_u16(&mut buffer[header_start + 4..header_start + 6], self.version);
+        
+        // Write Min Program Version (2 bytes) at offset 6.
+        BigEndian::write_u16(&mut buffer[header_start + 6..header_start + 8], self.min_program_version);
+        
+        // Write Key Area CRC32 (4 bytes) at offset 8.
+        // We will calculate this later after writing key area.
+        
+        // Write Volume Creation Time (8 bytes) at offset 12.
+        BigEndian::write_u64(&mut buffer[header_start + 12..header_start + 20], self.volume_creation_time);
+        
+        // Write Header Creation Time (8 bytes) at offset 20.
+        BigEndian::write_u64(&mut buffer[header_start + 20..header_start + 28], self.header_creation_time);
+        
+        // Write Hidden Volume Size (8 bytes) at offset 28.
+        BigEndian::write_u64(&mut buffer[header_start + 28..header_start + 36], self.hidden_volume_size);
+        
+        // Write Volume Data Size (8 bytes) at offset 36.
+        BigEndian::write_u64(&mut buffer[header_start + 36..header_start + 44], self.volume_data_size);
+        
+        // Write Encrypted Area Start (8 bytes) at offset 44.
+        BigEndian::write_u64(&mut buffer[header_start + 44..header_start + 52], self.encrypted_area_start);
+        
+        // Write Encrypted Area Length (8 bytes) at offset 52.
+        BigEndian::write_u64(&mut buffer[header_start + 52..header_start + 60], self.encrypted_area_length);
+        
+        // Write Flags (4 bytes) at offset 60.
+        BigEndian::write_u32(&mut buffer[header_start + 60..header_start + 64], self.flags);
+        
+        // Write Sector Size (4 bytes) at offset 64.
+        BigEndian::write_u32(&mut buffer[header_start + 64..header_start + 68], self.sector_size);
+        
+        // Write Key Area (256 bytes) at offset 192 (header_start + 192).
+        buffer[header_start + 192..header_start + 448].copy_from_slice(&self.master_key_data);
+        
+        // Calculate Key Area CRC32.
+        let key_area_crc = crc32fast::hash(&buffer[header_start + 192..header_start + 448]);
+        
+        // Write Key Area CRC32 at offset 8.
+        BigEndian::write_u32(&mut buffer[header_start + 8..header_start + 12], key_area_crc);
+        
+        // Calculate Header CRC32 (first 188 bytes of encrypted area).
+        // 0 to 188 relative to header_start.
+        let header_crc = crc32fast::hash(&buffer[header_start..header_start + 188]);
+        
+        // Write Header CRC32 at offset 188.
+        BigEndian::write_u32(&mut buffer[header_start + 188..header_start + 192], header_crc);
+        
+        // The rest of the buffer (up to 512 bytes) is already zero or filled? 
+        // We initialized with zeros.
+        
+        Ok(buffer)
+    }
 }

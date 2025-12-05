@@ -183,14 +183,16 @@ impl SupportedFileSystem {
                     while let Some(entry) = entries.next(&mut *reader) {
                         let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
                         // Check if the entry name matches the current component.
-                        let key = entry.key().expect("entry has no key")?;
-                        if key.name().to_string_lossy() == component && key.is_directory() {
-                            let id = entry.file_reference().file_record_number();
-                            current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
-                                io::Error::new(io::ErrorKind::Other, e.to_string())
-                            })?;
-                            found = true;
-                            break;
+                        let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
+                        if let Some(key) = key {
+                            if key.name().to_string_lossy() == component && key.is_directory() {
+                                let id = entry.file_reference().file_record_number();
+                                current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                    io::Error::new(io::ErrorKind::Other, e.to_string())
+                                })?;
+                                found = true;
+                                break;
+                            }
                         }
                     }
                     // If component not found, return NotFound error.
@@ -208,24 +210,27 @@ impl SupportedFileSystem {
                 let mut entries = index.entries();
                 while let Some(entry) = entries.next(&mut *reader) {
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
-                    let key = entry.key().expect("entry has no key")?;
-                    // Get the name of the entry.
-                    let name = key.name().to_string_lossy();
-                    // Skip current and parent directory entries.
-                    if name == "." || name == ".." {
-                        continue;
+                    let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
+                    
+                    if let Some(key) = key {
+                        // Get the name of the entry.
+                        let name = key.name().to_string_lossy();
+                        // Skip current and parent directory entries.
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+    
+                        // Determine if it's a directory.
+                        let is_dir = key.is_directory();
+                        // Get the size of the entry.
+                        let size = key.data_size();
+                        // Add to results.
+                        results.push(FileInfo {
+                            name: name.to_string(),
+                            is_dir,
+                            size,
+                        });
                     }
-
-                    // Determine if it's a directory.
-                    let is_dir = key.is_directory();
-                    // Get the size of the entry.
-                    let size = key.data_size();
-                    // Add to results.
-                    results.push(FileInfo {
-                        name: name.to_string(),
-                        is_dir,
-                        size,
-                    });
                 }
                 // Return the list of files.
                 Ok(results)
@@ -313,7 +318,7 @@ impl SupportedFileSystem {
         };
 
         // Separate the file name from the directory path components.
-        let (file_name, dir_components) = components.split_last().unwrap();
+        let (file_name, dir_components) = components.split_last().ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path components"))?;
 
         match self {
             // Handle NTFS file system.
@@ -334,14 +339,16 @@ impl SupportedFileSystem {
                     let mut entries = index.entries();
                     while let Some(entry) = entries.next(&mut *reader) {
                         let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
-                        let key = entry.key().expect("entry has no key")?;
-                        if key.name().to_string_lossy() == *component && key.is_directory() {
-                            let id = entry.file_reference().file_record_number();
-                            current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
-                                io::Error::new(io::ErrorKind::Other, e.to_string())
-                            })?;
-                            found = true;
-                            break;
+                        let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
+                        if let Some(key) = key {
+                            if key.name().to_string_lossy() == *component && key.is_directory() {
+                                let id = entry.file_reference().file_record_number();
+                                current_dir = ntfs.file(&mut *reader, id).map_err(|e| {
+                                    io::Error::new(io::ErrorKind::Other, e.to_string())
+                                })?;
+                                found = true;
+                                break;
+                            }
                         }
                     }
                     if !found {
@@ -356,27 +363,29 @@ impl SupportedFileSystem {
                 let mut entries = index.entries();
                 while let Some(entry) = entries.next(&mut *reader) {
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
-                    let key = entry.key().expect("entry has no key")?;
-                    // Check if entry name matches file name.
-                    if key.name().to_string_lossy() == *file_name {
-                        // Convert entry to file.
-                        let id = entry.file_reference().file_record_number();
-                        let file = ntfs
-                            .file(&mut *reader, id)
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                        // Get data attribute (content).
-                        let data = file.data(&mut *reader, "");
-                        if let Some(attr_res) = data {
-                            let attr_item = attr_res
+                    let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
+                    if let Some(key) = key {
+                        // Check if entry name matches file name.
+                        if key.name().to_string_lossy() == *file_name {
+                            // Convert entry to file.
+                            let id = entry.file_reference().file_record_number();
+                            let file = ntfs
+                                .file(&mut *reader, id)
                                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                            let attr = attr_item.to_attribute().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                            let mut value = attr
-                                .value(&mut *reader)
-                                .map_err(|e: ntfs::NtfsError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                            // Seek to the requested offset.
-                            value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                            // Read data into buffer.
-                            return value.read(&mut *reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+                            // Get data attribute (content).
+                            let data = file.data(&mut *reader, "");
+                            if let Some(attr_res) = data {
+                                let attr_item = attr_res
+                                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                let attr = attr_item.to_attribute().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                let mut value = attr
+                                    .value(&mut *reader)
+                                    .map_err(|e: ntfs::NtfsError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                // Seek to the requested offset.
+                                value.seek(&mut *reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                // Read data into buffer.
+                                return value.read(&mut *reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+                            }
                         }
                     }
                 }
