@@ -208,9 +208,23 @@ impl SupportedFileSystem {
                 let mut results = Vec::new();
                 // Iterate through entries to collect file info.
                 let mut entries = index.entries();
-                while let Some(entry) = entries.next(&mut *reader) {
-                    let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
-                    let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
+                while let Some(entry_res) = entries.next(&mut *reader) {
+                    // Handle individual entry errors without failing the whole listing
+                    let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = match entry_res {
+                        Ok(e) => e,
+                        Err(e) => {
+                            log::warn!("Failed to read NTFS entry: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    let key = match entry.key() {
+                        Ok(k) => k,
+                        Err(e) => {
+                             log::warn!("Failed to read NTFS entry key: {}", e);
+                             continue;
+                        }
+                    };
                     
                     if let Some(key) = key {
                         // Get the name of the entry.

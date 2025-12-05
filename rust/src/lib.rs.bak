@@ -33,8 +33,7 @@ use exfat::ExFat;
 use jni::objects::JValue;
 
 // Import Mutex from std::sync to provide mutual exclusion for thread-safe data access.
-// Import Mutex and RwLock from std::sync for concurrency.
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
 // Import the lazy_static macro to allow declaring lazily evaluated static variables.
 use lazy_static::lazy_static;
 
@@ -48,9 +47,9 @@ lazy_static! {
     // Initialize it with a new, empty Mutex containing an empty Vector.
     static ref LOG_BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
     // Define a static global variable named FILESYSTEMS.
-    // It is a RwLock-protected HashMap mapping i64 handles to Arc<Mutex<SupportedFileSystem>>.
-    // This allows concurrent access to the map (read) while specific filesystems are locked individually.
-    static ref FILESYSTEMS: RwLock<std::collections::HashMap<i64, Arc<Mutex<SupportedFileSystem>>>> = RwLock::new(std::collections::HashMap::new());
+    // It is a Mutex-protected HashMap mapping i64 handles to SupportedFileSystem enums.
+    // This stores the active file system instances.
+    static ref FILESYSTEMS: Mutex<std::collections::HashMap<i64, SupportedFileSystem>> = Mutex::new(std::collections::HashMap::new());
     // Define a static global variable named NEXT_FS_HANDLE.
     // It is a Mutex-protected i64 counter used to generate unique handles for file systems.
     // Initialize it with 1.
@@ -203,12 +202,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
 ) {
     // Wrap execution in panic::catch_unwind.
     let _ = std::panic::catch_unwind(|| {
-        if let Ok(mut lock) = FILESYSTEMS.write() {
+        if let Ok(mut lock) = FILESYSTEMS.lock() {
             lock.remove(&handle);
-        } else if let Err(poisoned) = FILESYSTEMS.write() {
-             // If poisoned, we can still recover the lock to remove the item
-             let mut lock = poisoned.into_inner();
-             lock.remove(&handle);
         }
     });
 }
@@ -689,20 +684,19 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         if Ntfs::new(&mut reader_clone).is_ok() {
             // Log success.
             log::info!("Mounted NTFS");
-            // Lock the FILESYSTEMS map for writing.
-            // Using unwrap_or_else to handle poisoning gracefully (we want to insert anyway).
-            let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
-            
-            // Lock the NEXT_FS_HANDLE counter.
-            if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
-                // Get the current handle value.
-                let handle = *handle_lock;
-                // Increment the handle counter.
-                *handle_lock += 1;
-                // Insert the NTFS reader into the map with the new handle wrapped in Arc<Mutex>.
-                lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(reader_clone))));
-                // Return the handle.
-                return handle;
+            // Lock the FILESYSTEMS map.
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                // Lock the NEXT_FS_HANDLE counter.
+                if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
+                    // Get the current handle value.
+                    let handle = *handle_lock;
+                    // Increment the handle counter.
+                    *handle_lock += 1;
+                    // Insert the NTFS reader into the map with the new handle.
+                    lock.insert(handle, SupportedFileSystem::Ntfs(reader_clone));
+                    // Return the handle.
+                    return handle;
+                }
             }
             return -1;
         }
@@ -714,22 +708,22 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         if let Ok(exfat) = ExFat::open(reader_clone2) {
             // Log success.
             log::info!("Mounted exFAT");
-                // Lock the FILESYSTEMS map for writing.
-            let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
-             
-             // Lock the NEXT_FS_HANDLE counter.
-             if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
-                 // Get the current handle value.
-                 let handle = *handle_lock;
-                 // Increment the handle counter.
-                 *handle_lock += 1;
-                 // Insert the exFAT instance into the map with the new handle wrapped in Arc<Mutex>.
-                 let items: Vec<_> = exfat.into_iter().collect();
-                 lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::ExFat(items))));
-                 // Return the handle.
-                 return handle;
-             }
-             return -1;
+            // Lock the FILESYSTEMS map.
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                // Lock the NEXT_FS_HANDLE counter.
+                if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
+                    // Get the current handle value.
+                    let handle = *handle_lock;
+                    // Increment the handle counter.
+                    *handle_lock += 1;
+                    // Insert the exFAT instance into the map with the new handle.
+                    let items: Vec<_> = exfat.into_iter().collect();
+                    lock.insert(handle, SupportedFileSystem::ExFat(items));
+                    // Return the handle.
+                    return handle;
+                }
+            }
+            return -1;
         }
 
         // Log a warning if neither NTFS nor exFAT could be mounted.
@@ -764,30 +758,19 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
 
         // Retrieve the list of files from the file system.
         let files = {
-            // Lock the FILESYSTEMS map for reading.
-            let lock = FILESYSTEMS.read().unwrap_or_else(|e| e.into_inner());
-            
-            if let Some(fs_arc) = lock.get(&fs_handle) {
-                 // Lock the specific filesystem for mutation (list_files requires &mut self).
-                 if let Ok(mut fs) = fs_arc.lock() {
-                     // Call list_files on it.
-                     fs.list_files(&path).unwrap_or_default()
-                 } else {
-                     // If individual FS lock is poisoned, return empty or try to recover?
-                     // Verify if we can recover. If it panicked inside list_files, it might be in inconsistent state via Mutex.
-                     // But we can try.
-                     match fs_arc.lock() {
-                         Ok(mut fs) => fs.list_files(&path).unwrap_or_default(),
-                         Err(poisoned) => {
-                             // Try to recover
-                             let mut fs = poisoned.into_inner();
-                             fs.list_files(&path).unwrap_or_default()
-                         }
-                     }
-                 }
+            // Lock the FILESYSTEMS map.
+            // Check if lock fails
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                 if let Some(fs) = lock.get_mut(&fs_handle) {
+                    // If found, call list_files on it.
+                    // If list_files fails, return an empty vector.
+                    fs.list_files(&path).unwrap_or_default()
+                } else {
+                    // If not found, return an empty vector.
+                    Vec::new()
+                }
             } else {
-                // If not found, return an empty vector.
-                Vec::new()
+                 Vec::new()
             }
         };
 

@@ -5,9 +5,6 @@ use jni::objects::{GlobalRef, JValue};
 use jni::JavaVM;
 use std::sync::Arc;
 
-// Import zeroize trait.
-use zeroize::Zeroize;
-
 // Struct to read data via a Java callback.
 #[derive(Clone)]
 pub struct CallbackReader {
@@ -48,9 +45,8 @@ impl Read for CallbackReader {
         })?;
 
         // Prepare arguments.
-        // Cap length at i32::MAX to prevent overflow when calling Java
-        let len = std::cmp::min(buf.len(), i32::MAX as usize) as i32;
-        let offset = self.position as i64; // overflow of i64 is possible for huge volumes > 8EB, unavoidable with JNI interface long
+        let len = buf.len() as i32;
+        let offset = self.position as i64;
 
         // Call Java method: byte[] read(long offset, int length)
         let result = env
@@ -81,9 +77,6 @@ impl Read for CallbackReader {
         // Check if returned data fits in buffer.
         let read_len = bytes.len();
         if read_len > buf.len() {
-            // Need to handle this or clean up
-            let mut bytes = bytes;
-            bytes.zeroize();
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Java returned more bytes than requested",
@@ -92,11 +85,6 @@ impl Read for CallbackReader {
 
         // Copy data to buffer.
         buf[..read_len].copy_from_slice(&bytes);
-        
-        // Zeroize the intermediate buffer.
-        let mut bytes = bytes;
-        bytes.zeroize();
-
         // Update position.
         self.position += read_len as u64;
 
@@ -118,14 +106,7 @@ impl Seek for CallbackReader {
                         "Cannot seek from end: size unknown",
                     ));
                 }
-                // Safe arithmetic for seek from end
-                if p >= 0 {
-                    self.volume_size.checked_add(p as u64)
-                        .ok_or(io::Error::new(io::ErrorKind::Other, "Seek overflow"))?
-                } else {
-                     self.volume_size.checked_sub(p.unsigned_abs())
-                        .ok_or(io::Error::new(io::ErrorKind::Other, "Seek underflow"))?
-                }
+                (self.volume_size as i64 + p) as u64
             }
             SeekFrom::Current(p) => (self.position as i64 + p) as u64,
         };
