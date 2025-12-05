@@ -134,42 +134,78 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
     // The Java class.
     _class: JClass,
 ) -> jobjectArray {
-    // Attempt to lock the LOG_BUFFER and clone its contents.
-    let logs = match LOG_BUFFER.lock() {
-        // If successful, clone the vector of strings.
-        Ok(buffer) => buffer.clone(),
-        // If the lock fails (e.g., poisoned), return a vector with an error message.
-        Err(_) => vec!["Failed to lock log buffer".to_string()],
-    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Attempt to lock the LOG_BUFFER and clone its contents.
+        let logs = match LOG_BUFFER.lock() {
+            // If successful, clone the vector of strings.
+            Ok(buffer) => buffer.clone(),
+            // If the lock fails (e.g., poisoned), return a vector with an error message.
+            Err(_) => vec!["Failed to lock log buffer".to_string()],
+        };
 
-    // Find the java.lang.String class in the JVM.
-    // Expect success, otherwise panic with a message.
-    let string_class = env
-        .find_class("java/lang/String")
-        .expect("Could not find String class");
-    // Create a new empty Java string to use as an initial element/template.
-    // Expect success.
-    let empty_string = env.new_string("").expect("Could not create empty string");
-
-    // Create a new object array of Strings with the size of the logs vector.
-    // Expect success.
-    let array = env
-        .new_object_array(logs.len() as i32, string_class, empty_string)
-        .expect("Could not create string array");
-
-    // Iterate over the logs with their index.
-    for (i, log) in logs.iter().enumerate() {
-        // Create a new Java string from the Rust string log message.
+        // Find the java.lang.String class in the JVM.
+        // Expect success, otherwise panic with a message.
+        let string_class = env
+            .find_class("java/lang/String")
+            .unwrap_or_else(|_| {
+                 // Fallback? If we can't find String, we can't do much.
+                 panic!("Could not find String class");
+            });
+            
+        // Create a new empty Java string to use as an initial element/template.
         // Expect success.
-        let jstr = env.new_string(log).expect("Could not create string");
-        // Set the element at index i in the array to the created Java string.
+        let empty_string = env.new_string("").unwrap_or_else(|_| panic!("Could not create empty string"));
+
+        // Create a new object array of Strings with the size of the logs vector.
         // Expect success.
-        env.set_object_array_element(&array, i as i32, jstr)
-            .expect("Could not set array element");
+        let array = env
+            .new_object_array(logs.len() as i32, string_class, empty_string)
+            .unwrap_or(std::ptr::null_mut()); // Use unwrap_or to just return null if fail
+            
+        if array.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        // Iterate over the logs with their index.
+        for (i, log) in logs.iter().enumerate() {
+            // Create a new Java string from the Rust string log message.
+            if let Ok(jstr) = env.new_string(log) {
+                 // Set the element at index i in the array to the created Java string.
+                let _ = env.set_object_array_element(&array, i as i32, jstr);
+            }
+        }
+
+        // Return the raw pointer to the Java object array.
+        array.into_raw()
+    }));
+    
+    match result {
+        Ok(ptr) => ptr,
+        Err(_) => std::ptr::null_mut(),
     }
+}
 
-    // Return the raw pointer to the Java object array.
-    array.into_raw()
+// ... init ... (skipping unchanged functions)
+
+// ...
+
+// Define a JNI function named Java_com_noxcipher_RustNative_closeFs.
+// It closes the file system associated with the handle.
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
+    // The JNI environment.
+    _env: JNIEnv,
+    // The Java class.
+    _class: JClass,
+    // The file system handle.
+    handle: jlong,
+) {
+    // Wrap execution in panic::catch_unwind.
+    let _ = std::panic::catch_unwind(|| {
+        if let Ok(mut lock) = FILESYSTEMS.lock() {
+            lock.remove(&handle);
+        }
+    });
 }
 
 // Define a JNI function named Java_com_noxcipher_RustNative_init.
@@ -258,6 +294,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             // If the pointer is null, return None.
             None
         };
+
+        if partition_offset < 0 {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative partition offset");
+            return -1;
+        }
 
         // Call the volume::create_context function to attempt to mount the volume.
         // Pass references to the password, header, and other parameters.
@@ -404,6 +445,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
                 format!("Failed to write back array: {}", e),
             );
         }
+        
+        // Zeroize buffer
+        use zeroize::Zeroize;
+        buf.zeroize();
     }));
 }
 
@@ -483,6 +528,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
                 format!("Failed to write back array: {}", e),
             );
         }
+        
+        // Zeroize buffer
+        use zeroize::Zeroize;
+        buf.zeroize();
     }));
 }
 
@@ -664,73 +713,107 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
     // The path to list as a Java string.
     path_obj: jni::objects::JString,
 ) -> jobjectArray {
-    // Convert the Java string path to a Rust String.
-    // If conversion fails, use an empty string.
-    let path: String = env
-        .get_string(&path_obj)
-        .map(|s| s.into())
-        .unwrap_or_default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Convert the Java string path to a Rust String.
+        // If conversion fails, use an empty string.
+        let path: String = env
+            .get_string(&path_obj)
+            .map(|s| s.into())
+            .unwrap_or_default();
 
-    // Retrieve the list of files from the file system.
-    let files = {
-        // Lock the FILESYSTEMS map.
-        let mut lock = FILESYSTEMS.lock().unwrap();
-        // Look up the file system by handle.
-        if let Some(fs) = lock.get_mut(&fs_handle) {
-            // If found, call list_files on it.
-            // If list_files fails, return an empty vector.
-            fs.list_files(&path).unwrap_or_default()
-        } else {
-            // If not found, return an empty vector.
-            Vec::new()
-        }
-    };
+        // Retrieve the list of files from the file system.
+        let files = {
+            // Lock the FILESYSTEMS map.
+            // Check if lock fails
+            if let Ok(mut lock) = FILESYSTEMS.lock() {
+                 if let Some(fs) = lock.get_mut(&fs_handle) {
+                    // If found, call list_files on it.
+                    // If list_files fails, return an empty vector.
+                    fs.list_files(&path).unwrap_or_default()
+                } else {
+                    // If not found, return an empty vector.
+                    Vec::new()
+                }
+            } else {
+                 Vec::new()
+            }
+        };
 
-    // Find the com.noxcipher.RustFile class.
-    // Expect success.
-    let file_class = env
-        .find_class("com/noxcipher/RustFile")
-        .expect("RustFile class not found");
-    // Get the constructor ID for RustFile (String name, boolean isDir, long size).
-    // Expect success.
-    let init_id = env
-        .get_method_id(&file_class, "<init>", "(Ljava/lang/String;ZJ)V")
-        .expect("RustFile constructor not found");
+        // Find the com.noxcipher.RustFile class.
+        // Expect success.
+        let file_class = match env.find_class("com/noxcipher/RustFile") {
+             Ok(cls) => cls,
+             Err(e) => {
+                 log::error!("Failed to find RustFile class: {}", e);
+                 return ptr::null_mut(); // Return null on failure
+             }
+        };
 
-    // Create a new object array of RustFile objects with the size of the files vector.
-    // Initialize with null.
-    // Expect success.
-    let array = env
-        .new_object_array(
+        // Get the constructor ID for RustFile (String name, boolean isDir, long size).
+        // Expect success.
+        let init_id = match env.get_method_id(&file_class, "<init>", "(Ljava/lang/String;ZJ)V") {
+            Ok(id) => id,
+            Err(e) => {
+                 log::error!("Failed to find RustFile constructor: {}", e);
+                 return ptr::null_mut();
+            }
+        };
+
+        // Create a new object array of RustFile objects with the size of the files vector.
+        // Initialize with null.
+        // Expect success.
+        let array = match env.new_object_array(
             files.len() as i32,
             &file_class,
             jni::objects::JObject::null(),
-        )
-        .expect("Failed to create array");
+        ) {
+            Ok(arr) => arr,
+            Err(e) => {
+                 log::error!("Failed to create RustFile array: {}", e);
+                 return ptr::null_mut();
+            }
+        };
 
-    // Iterate over the files and populate the array.
-    for (i, f) in files.iter().enumerate() {
-        // Create a Java string for the file name.
-        let name_jstr = env.new_string(&f.name).unwrap();
-        // Create a new RustFile object using the constructor.
-        let obj = unsafe {
-            env.new_object_unchecked(
-                &file_class,
-                init_id,
-                &[
-                    JValue::Object(&name_jstr).as_jni(),   // name
-                    JValue::Bool(f.is_dir as u8).as_jni(), // isDir
-                    JValue::Long(f.size as i64).as_jni(),  // size
-                ],
-            )
+        // Iterate over the files and populate the array.
+        for (i, f) in files.iter().enumerate() {
+            // Create a Java string for the file name.
+            let name_jstr = match env.new_string(&f.name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            
+            // Create a new RustFile object using the constructor.
+            let obj = unsafe {
+                env.new_object_unchecked(
+                    &file_class,
+                    init_id,
+                    &[
+                        JValue::Object(&name_jstr).as_jni(),   // name
+                        JValue::Bool(f.is_dir as u8).as_jni(), // isDir
+                        JValue::Long(f.size as i64).as_jni(),  // size
+                    ],
+                )
+            };
+            
+            if let Ok(obj_ref) = obj {
+                 // Set the array element at index i.
+                 if let Err(e) = env.set_object_array_element(&array, i as i32, obj_ref) {
+                     log::warn!("Failed to set array element: {}", e);
+                 }
+            }
         }
-        .unwrap();
-        // Set the array element at index i.
-        env.set_object_array_element(&array, i as i32, obj).unwrap();
-    }
 
-    // Return the raw pointer to the array.
-    array.into_raw()
+        // Return the raw pointer to the array.
+        array.into_raw()
+    }));
+
+    match result {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            log::error!("Panic in listFiles");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // Define a JNI function named Java_com_noxcipher_RustNative_readFile.
@@ -751,44 +834,65 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     // The buffer to read into.
     buffer: jbyteArray,
 ) -> jlong {
-    // Convert the Java string path to a Rust String.
-    // If conversion fails, use an empty string.
-    let path: String = env
-        .get_string(&path_obj)
-        .map(|s| s.into())
-        .unwrap_or_default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Convert the Java string path to a Rust String.
+        // If conversion fails, use an empty string.
+        let path: String = env
+            .get_string(&path_obj)
+            .map(|s| s.into())
+            .unwrap_or_default();
 
-    // Access the file system.
-    let mut lock = FILESYSTEMS.lock().unwrap();
-    // Look up the file system by handle.
-    if let Some(fs) = lock.get_mut(&fs_handle) {
-        // Convert the raw JByteArray buffer to a JByteArray object unsafely.
-        let buf_obj = unsafe { JByteArray::from_raw(buffer) };
-        // Get the length of the buffer.
-        let len = env.get_array_length(&buf_obj).unwrap_or(0);
-        // Allocate a Rust vector of zeros with the same length.
-        let mut buf = vec![0u8; len as usize];
+        // Access the file system.
+        if let Ok(mut lock) = FILESYSTEMS.lock() {
+             // Look up the file system by handle.
+            if let Some(fs) = lock.get_mut(&fs_handle) {
+                // Convert the raw JByteArray buffer to a JByteArray object unsafely.
+                let buf_obj = unsafe { JByteArray::from_raw(buffer) };
+                // Get the length of the buffer.
+                let len = env.get_array_length(&buf_obj).unwrap_or(0);
+                // Allocate a Rust vector of zeros with the same length.
+                let mut buf = vec![0u8; len as usize];
 
-        // Read the file content into the buffer.
-        match fs.read_file(&path, offset as u64, &mut buf) {
-            // If successful, returns the number of bytes read.
-            Ok(bytes_read) => {
-                // Write the data back to the Java array.
-                // Get a const pointer to the buffer and cast it to i8.
-                let buf_ptr = buf.as_ptr() as *const i8;
-                // Create a slice from the raw parts with the number of bytes read.
-                let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
-                // Set the Java byte array region.
-                env.set_byte_array_region(&buf_obj, 0, buf_slice).unwrap();
-                // Return the number of bytes read as jlong.
-                bytes_read as jlong
+                // Read the file content into the buffer.
+                let res = match fs.read_file(&path, offset as u64, &mut buf) {
+                    // If successful, returns the number of bytes read.
+                    Ok(bytes_read) => {
+                        // Write the data back to the Java array.
+                        // Get a const pointer to the buffer and cast it to i8.
+                         let buf_ptr = buf.as_ptr() as *const i8;
+                        // Create a slice from the raw parts with the number of bytes read.
+                        let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
+                        // Set the Java byte array region.
+                        if let Err(e) = env.set_byte_array_region(&buf_obj, 0, buf_slice) {
+                             log::error!("Failed to set byte array region: {}", e);
+                             -1
+                        } else {
+                            bytes_read as jlong
+                        }
+                    }
+                    // If reading fails, return -1.
+                    Err(_) => -1,
+                };
+                
+                // Zeroize buffer
+                use zeroize::Zeroize;
+                buf.zeroize();
+                
+                res
+            } else {
+                -1
             }
-            // If reading fails, return -1.
-            Err(_) => -1,
+        } else {
+            -1
         }
-    } else {
-        // If file system not found, return -1.
-        -1
+    }));
+
+    match result {
+        Ok(val) => val,
+        Err(_) => {
+            log::error!("Panic in readFile");
+            -1
+        }
     }
 }
 
@@ -801,11 +905,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
     // The Java class.
     _class: JClass,
     // The file system handle.
-    fs_handle: jlong,
+    handle: jlong,
 ) {
-    // Lock the FILESYSTEMS map.
-    let mut lock = FILESYSTEMS.lock().unwrap();
-    // Remove the file system with the given handle.
-    // This will drop the SupportedFileSystem instance, cleaning up resources.
-    lock.remove(&fs_handle);
+    // Wrap execution in panic::catch_unwind.
+    let _ = std::panic::catch_unwind(|| {
+        if let Ok(mut lock) = FILESYSTEMS.lock() {
+            lock.remove(&handle);
+        }
+    });
 }
+

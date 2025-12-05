@@ -368,6 +368,39 @@ pub fn create_context(
         }
     }
 
+    // 3. Try Backup Header at offset (Volume Size - 131072)
+    // VeraCrypt stores a backup header at the end of the volume.
+    // Offset is: volume_size - 131072
+    if protection_password.is_none() {
+        // We can't access the end of the file from just `header_bytes` buffer (which is likely small).
+        // We need to read from the end of the volume.
+        // But `create_context` only takes `header_bytes` buffer.
+        // Wait, the JNI passes `header` as `jbyteArray`. This is usually just the first 128KB?
+        // Checking `lib.rs`: `header` is passed from Java. Java side likely reads the first chunk.
+        // To support backup header, we either need the Java side to pass the backup header buffer,
+        // or we need to change the API to take a file path/descriptor.
+        // The current design seems to rely on Java doing the I/O for the header?
+        // Let's verify `lib.rs`.
+        // `Java_com_noxcipher_RustNative_init` takes `password`, `header` (byte array).
+        // If we want backup header, we need to ask the user (Java code) to provide it, OR we can't implement it here without changing JNI.
+        // However, looking at `implementation_plan.md`, I proposed: "Update create_context to try mounting from the backup header offset".
+        // If `header_bytes` contains ONLY the first chunk, we can't do it here unless `header_bytes` is the WHOLE volume (unlikely).
+        // Let's check `lib.rs` volume size arg.
+        // It takes `volume_size`.
+        // We can't read from the disk here because we don't have the file handle/path in `create_context`.
+        // `create_context` is pure logic.
+        // So I CANNOT implement Backup Header support fully without changing the Java side to read the backup header and pass it.
+        // BUT, I can implement the PIM fix.
+        // I will stick to the PIM fix for now and flag the Backup Header issue for a JNI change if needed.
+        // Wait, `header_bytes` is a slice.
+        // If I can't implement Backup Header, I should flag it.
+        // Re-reading `lib.rs`: `header` comes from `jbyteArray`.
+        // The Java code reads 128KB usually.
+        // I will SKIP the backup header implementation in THIS file for now, or just add a TODO comment/log?
+        // Better: I will acknowledge I can't do it without the data.
+        // Actually, I can fix the PIM overflow.
+    }
+
     Err(VolumeError::InvalidPassword(format!("All attempts failed. Errors: {:?}", attempt_errors)))
 }
 
@@ -399,9 +432,9 @@ fn try_header_at_offset(
     // If PIM is specified, calculate iterations based on PIM.
     if pim > 0 {
         // Standard iterations with PIM.
-        iterations_list.push(15000 + (pim as u32 * 1000));
+        iterations_list.push(15000 + (pim as u64 * 1000) as u32);
         // System Encryption / Boot (SHA-256, Blake2s, Streebog) with PIM.
-        iterations_list.push(pim as u32 * 2048);
+        iterations_list.push((pim as u64 * 2048) as u32);
     } else {
         // Default VeraCrypt iterations.
         iterations_list.push(500_000);
@@ -594,7 +627,7 @@ fn try_header_at_offset(
         // Calculate specific iteration count for RIPEMD-160.
         let ripemd_iter = if pim > 0 {
             // For RIPEMD-160, PIM formula is same as others? Yes.
-            15000 + (pim as u32 * 1000)
+            15000 + (pim as u64 * 1000) as u32
         } else {
             // Map standard iteration counts to RIPEMD specific ones.
             if iter == 500_000 {

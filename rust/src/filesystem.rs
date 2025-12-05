@@ -11,6 +11,8 @@ use ntfs::{Ntfs, NtfsReadSeek};
 // Import ExFAT implementation.
 // use exfat::ExFat;
 
+use zeroize::Zeroize;
+
 // Struct representing a reader that decrypts data on the fly.
 #[derive(Clone)]
 pub struct DecryptedReader {
@@ -24,6 +26,12 @@ pub struct DecryptedReader {
     current_sector_index: u64,
     // Buffer to hold the decrypted data of the current sector.
     sector_buffer: Vec<u8>,
+}
+
+impl Drop for DecryptedReader {
+    fn drop(&mut self) {
+        self.sector_buffer.zeroize();
+    }
 }
 
 // Implementation of DecryptedReader methods.
