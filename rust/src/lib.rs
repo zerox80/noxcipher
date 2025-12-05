@@ -344,6 +344,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         use zeroize::Zeroize;
         // Zeroize the password bytes in memory.
         password_bytes.zeroize();
+        // Zeroize header bytes.
+        header_bytes.zeroize();
         // If protection password bytes exist, zeroize them as well.
         // If protection password bytes exist, zeroize them as well.
         if let Some(ref mut pp) = protection_password_bytes {

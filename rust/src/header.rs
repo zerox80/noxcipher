@@ -59,7 +59,7 @@ impl fmt::Display for HeaderError {
 // Define the VolumeHeader struct which represents the decrypted volume header.
 // Derive Debug and Clone for utility purposes.
 // Derive Zeroize and ZeroizeOnDrop to ensure sensitive data is wiped from memory when the struct is dropped.
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 #[allow(dead_code)]
 #[allow(unused_assignments)]
 pub struct VolumeHeader {
@@ -94,6 +94,26 @@ pub struct VolumeHeader {
     // The master key data, fixed at 256 bytes.
     // This contains the concatenated master keys for the volume.
     pub master_key_data: [u8; 256], // Max key area size
+}
+
+impl fmt::Debug for VolumeHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VolumeHeader")
+            .field("version", &self.version)
+            .field("min_program_version", &self.min_program_version)
+            .field("crc32", &self.crc32)
+            .field("volume_creation_time", &self.volume_creation_time)
+            .field("header_creation_time", &self.header_creation_time)
+            .field("hidden_volume_size", &self.hidden_volume_size)
+            .field("volume_data_size", &self.volume_data_size)
+            .field("encrypted_area_start", &self.encrypted_area_start)
+            .field("encrypted_area_length", &self.encrypted_area_length)
+            .field("flags", &self.flags)
+            .field("sector_size", &self.sector_size)
+            .field("key_area_crc32", &self.key_area_crc32)
+            .field("master_key_data", &"<REDACTED>")
+            .finish()
+    }
 }
 
 // Implementation block for VolumeHeader methods.
@@ -174,8 +194,10 @@ impl VolumeHeader {
         let mut sector_size = BigEndian::read_u32(&decrypted[64..68]);
 
         // For versions older than 5, the sector size is fixed at 512 bytes.
+        // However, if the read sector size is 0 or invalid (e.g. from a fresh init), we might want to default it.
+        // But if it was read as something else, we should probably respect it or fail?
+        // VeraCrypt implementation forces 512 for < 5.
         if version < 5 {
-            // Force sector size to 512.
             sector_size = 512;
         }
 
@@ -246,10 +268,7 @@ impl VolumeHeader {
         
         // Copy the salt (64 bytes) to the beginning.
         if salt.len() != 64 {
-             // Should handle error, but for now we assume caller provides 64 bytes.
-             // Or we could return error.
-             // HeaderError doesn't have InvalidSalt.
-             // Let's assume correct salt or panic? Better to be safe.
+             return Err(HeaderError::InvalidKeySize); // Reusing InvalidKeySize or add InvalidSalt
         }
         buffer[0..64].copy_from_slice(salt);
 

@@ -26,7 +26,7 @@ use streebog::Streebog512;
 // Import RIPEMD-160 hash function.
 use ripemd::Ripemd160;
 // Import Zeroize traits for secure memory clearing.
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // Import standard library types.
 use std::sync::{Arc, Mutex};
 // Import formatting traits.
@@ -635,7 +635,10 @@ fn try_header_at_offset(
         pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock with this key.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -645,7 +648,10 @@ fn try_header_at_offset(
         pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -655,7 +661,10 @@ fn try_header_at_offset(
         pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -667,7 +676,10 @@ fn try_header_at_offset(
         pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -677,7 +689,10 @@ fn try_header_at_offset(
         pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -705,7 +720,10 @@ fn try_header_at_offset(
         pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -715,7 +733,10 @@ fn try_header_at_offset(
         pbkdf2::<Hmac<Sha1>>(password, salt, iter, &mut header_key).ok();
         // Try to unlock.
         match try_unlock(&header_key) {
-            Ok(vol) => return Ok(vol),
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
             Err(VolumeError::InvalidPassword(msg)) => last_debug = msg,
             _ => {}
         }
@@ -750,9 +771,13 @@ fn register_context(vol: Volume) -> Result<i64, VolumeError> {
 #[allow(clippy::manual_is_multiple_of)]
 pub fn decrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeError> {
     // Lock the contexts map.
-    let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    // Look up the volume by handle.
-    if let Some(context) = contexts_lock.get(&handle) {
+    let volume = {
+        let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Look up the volume by handle and clone the Arc.
+        contexts_lock.get(&handle).cloned()
+    };
+
+    if let Some(context) = volume {
         // Check if offset is aligned to sector size.
         if offset % (context.header.sector_size as u64) != 0 {
             return Err(VolumeError::CryptoError(
@@ -774,9 +799,12 @@ pub fn decrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeEr
 #[allow(clippy::manual_is_multiple_of)]
 pub fn encrypt(handle: i64, offset: u64, data: &mut [u8]) -> Result<(), VolumeError> {
     // Lock the contexts map.
-    let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    // Look up the volume by handle.
-    if let Some(context) = contexts_lock.get(&handle) {
+    let volume = {
+        let contexts_lock = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        contexts_lock.get(&handle).cloned()
+    };
+
+    if let Some(context) = volume {
         // Check if offset is aligned to sector size.
         if offset % (context.header.sector_size as u64) != 0 {
             return Err(VolumeError::CryptoError(
@@ -848,7 +876,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     let cipher_enum = create_cipher(key_1, key_2);
 
     // Create a buffer for the decrypted header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     // Copy the encrypted header data.
     decrypted.copy_from_slice(encrypted_header);
 
@@ -915,7 +943,7 @@ fn try_cipher_serpent(
     let cipher_enum = SupportedCipher::Serpent(xts);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -971,7 +999,7 @@ fn try_cipher_aes_twofish(
     let cipher_enum = SupportedCipher::AesTwofish(cipher_aes, cipher_twofish);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1046,7 +1074,7 @@ fn try_cipher_aes_twofish_serpent(
         SupportedCipher::AesTwofishSerpent(cipher_aes, cipher_twofish, cipher_serpent);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1115,7 +1143,7 @@ fn try_cipher_serpent_aes(
     let cipher_enum = SupportedCipher::SerpentAes(cipher_serpent, cipher_aes);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1181,7 +1209,7 @@ fn try_cipher_twofish_serpent(
     let cipher_enum = SupportedCipher::TwofishSerpent(cipher_twofish, cipher_serpent);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1254,7 +1282,7 @@ fn try_cipher_serpent_twofish_aes(
         SupportedCipher::SerpentTwofishAes(cipher_serpent, cipher_twofish, cipher_aes);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1370,7 +1398,7 @@ fn try_cipher_camellia_kuznyechik(
     let cipher_enum = SupportedCipher::CamelliaKuznyechik(cipher_camellia, cipher_kuznyechik);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1431,15 +1459,15 @@ fn try_cipher_camellia_serpent(
         CamelliaWrapper::new(key_camellia_2.into()),
     );
     let cipher_serpent = Xts128::new(
-        Serpent::new_from_slice(key_serpent_1).unwrap(),
-        Serpent::new_from_slice(key_serpent_2).unwrap(),
+        Serpent::new_from_slice(key_serpent_1).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
+        Serpent::new_from_slice(key_serpent_2).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
     );
 
     // Wrap in SupportedCipher.
     let cipher_enum = SupportedCipher::CamelliaSerpent(cipher_camellia, cipher_serpent);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1460,8 +1488,8 @@ fn try_cipher_camellia_serpent(
             CamelliaWrapper::new(mk_camellia_2.into()),
         );
         let vol_serpent = Xts128::new(
-            Serpent::new_from_slice(mk_serpent_1).unwrap(),
-            Serpent::new_from_slice(mk_serpent_2).unwrap(),
+            Serpent::new_from_slice(mk_serpent_1).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
+            Serpent::new_from_slice(mk_serpent_2).map_err(|_| VolumeError::CryptoError("Invalid Serpent Key".into()))?,
         );
 
         // Check vulnerability.
@@ -1505,7 +1533,7 @@ fn try_cipher_kuznyechik_aes(
     let cipher_enum = SupportedCipher::KuznyechikAes(cipher_kuznyechik, cipher_aes);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1582,7 +1610,7 @@ fn try_cipher_kuznyechik_serpent_camellia(
     );
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
@@ -1657,7 +1685,7 @@ fn try_cipher_kuznyechik_twofish(
     let cipher_enum = SupportedCipher::KuznyechikTwofish(cipher_kuznyechik, cipher_twofish);
 
     // Decrypt header.
-    let mut decrypted = [0u8; 448];
+    let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
