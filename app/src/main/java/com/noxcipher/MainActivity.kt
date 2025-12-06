@@ -159,11 +159,14 @@ class MainActivity : AppCompatActivity() {
 
         // Break loop after first successful connection attempt to avoid race condition
         // Use manual byte conversion to avoid uncleared ByteBuffer
+        // Flag to track if we found any potential device
+        var permissionRequested = false
+        
         for (device in deviceList.values) {
             log("Device: ${device.deviceName} (Vendor: ${device.vendorId}, Product: ${device.productId})")
             
             if (usbManager.hasPermission(device)) {
-                // Check if native lib is initialized
+                 // Check if native lib is initialized
                 if (!RustNative.isInitialized) {
                     Toast.makeText(this, getString(R.string.toast_native_not_init), Toast.LENGTH_LONG).show()
                     return
@@ -172,19 +175,38 @@ class MainActivity : AppCompatActivity() {
                 // Use UTF-8 encoding for password (standard for Veracrypt)
                 val passwordBytes = passwordText.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
 
-                connectDevice(device, passwordBytes, pim)
+                // Try to connect. If successful, we are done.
+                // Note: 'connectDevice' launches a coroutine via ViewModel. 
+                // We can't easily know if it succeeded immediately here.
+                // But typically we only want to try the first valid-looking device or all?
+                // Identifying the correct device is hard without user selection.
+                // But assuming user plugged in ONE drive, we should try it.
+                // If multiple, this loop might trigger multiple connection attempts.
+                // For safety, let's try the first one we have permission for.
                 
-                // Clear UI immediately
-                passwordText.clear()
-                
-                // Break after first attempt to avoid cancelling our own job
-                break 
-            } else {
+                try {
+                    connectDevice(device, passwordBytes, pim)
+                    
+                    // Clear password bytes (best effort)
+                    passwordBytes.fill(0)
+                    
+                    // Clear UI immediately
+                    passwordText.clear()
+                    
+                    return // Stop after initiating connection to first authorized device
+                } catch (e: Exception) {
+                    log("Failed to start connection: ${e.message}")
+                }
+            } else if (!permissionRequested) {
+                // Request permission for the first unauthorized device we see, but continue checking others
                 requestPermission(device)
-                // Don't break here, we might want to request permission for multiple devices? 
-                // Or just the first one? Let's stick to first one for simplicity and consistency.
-                break
+                permissionRequested = true
             }
+        }
+        
+        if (!permissionRequested) {
+             // If we are here, we looped all devices. None had permission (or we requested it), or connection failed.
+             log("No suitable device connected or permission requested.")
         }
     }
 

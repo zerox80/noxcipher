@@ -250,22 +250,21 @@ impl VolumeHeader {
         })
     }
 
-    // Function to check if the XTS key is vulnerable.
+    // Function to check if a specific XTS key pair is vulnerable.
     // XTS keys are considered vulnerable if the two halves (Key1 and Key2) are identical.
-    pub fn is_key_vulnerable(&self, key_size: usize) -> bool {
-        // Ensure that the master key data is large enough to contain the full XTS key (2 * key_size).
-        if key_size * 2 > self.master_key_data.len() {
-            // If the key size is invalid for the buffer, return true (treat as vulnerable/error).
+    pub fn is_xts_key_vulnerable(&self, primary_offset: usize, secondary_offset: usize, key_size: usize) -> bool {
+        // Ensure that the master key data is large enough.
+        if primary_offset + key_size > self.master_key_data.len() || secondary_offset + key_size > self.master_key_data.len() {
+            // If the offsets are invalid, treat as vulnerable/error.
             return true;
         }
 
-        // Extract the first half of the XTS key (Key1) as a slice.
-        let key1 = &self.master_key_data[0..key_size];
-        // Extract the second half of the XTS key (Key2) as a slice.
-        let key2 = &self.master_key_data[key_size..key_size * 2];
+        // Extract the first half of the XTS key (Key1).
+        let key1 = &self.master_key_data[primary_offset..primary_offset + key_size];
+        // Extract the second half of the XTS key (Key2).
+        let key2 = &self.master_key_data[secondary_offset..secondary_offset + key_size];
 
-        // Return true if Key1 is identical to Key2, indicating a vulnerability.
-        // Otherwise, return false.
+        // Return true if Key1 is identical to Key2.
         key1 == key2
     }
 
@@ -307,7 +306,7 @@ impl VolumeHeader {
         
         // Copy the salt (64 bytes) to the beginning.
         if salt.len() != 64 {
-             return Err(HeaderError::InvalidKeySize); // Reusing InvalidKeySize or add InvalidSalt
+             return Err(HeaderError::DataTooShort(64));
         }
         buffer[0..64].copy_from_slice(salt);
 

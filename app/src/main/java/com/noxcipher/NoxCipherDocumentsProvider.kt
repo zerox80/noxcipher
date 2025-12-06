@@ -32,6 +32,18 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             DocumentsContract.Root.COLUMN_DOCUMENT_ID,
             DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
         )
+            DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
+        )
+        
+        private object BackgroundHandler {
+            private val handlerThread = android.os.HandlerThread("ContentProviderIO")
+            init {
+                handlerThread.start()
+            }
+            fun getHandler(): android.os.Handler {
+                return android.os.Handler(handlerThread.looper)
+            }
+        }
     }
 
     override fun onCreate(): Boolean {
@@ -65,7 +77,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
         
         try {
-            val parentFile = getFileForDocId(fs, parentDocumentId)
+            val parentFile = if (parentDocumentId == DEFAULT_ROOT_ID) {
+                fs.rootDirectory
+            } else {
+                 getFileForDocId(fs, parentDocumentId)
+            }
+             
             if (!parentFile.isDirectory) {
                 throw FileNotFoundException(context!!.getString(R.string.error_doc_not_dir, parentDocumentId))
             }
@@ -109,10 +126,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         
         val storageManager = context!!.getSystemService(android.content.Context.STORAGE_SERVICE) as android.os.storage.StorageManager
         
-        // Create a background thread for file I/O to avoid ANR
-        val handlerThread = android.os.HandlerThread("FileIOThread_${System.currentTimeMillis()}")
-        handlerThread.start()
-        val handler = android.os.Handler(handlerThread.looper)
+        // Use cached thread pool or single thread executor 
+        // For simplicity in this bug fix, use a lazy singleton executor or just cached thread pool.
+        // Creating a new HandlerThread for every file is bad.
+        // We can reuse a global HandlerThread.
+        
+        val handler = BackgroundHandler.getHandler()
 
         // We need to implement a ProxyFileDescriptorCallback
         val callback = object : android.os.ProxyFileDescriptorCallback() {
@@ -154,9 +173,8 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
                     file.flush()
                 } catch (e: IOException) {
                     // Ignore
-                } finally {
-                    handlerThread.quitSafely()
                 }
+                // Do NOT quit the shared thread.
             }
         }
         
@@ -211,12 +229,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
         
         // Flags
-        var flags = DocumentsContract.Document.FLAG_SUPPORTS_WRITE or
-                    DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+        // Disable write flags as write support is incomplete/buggy
+        val flags = 0 // DocumentsContract.Document.FLAG_SUPPORTS_WRITE | ...
         
-        if (file.isDirectory) {
-            flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
-        }
+        // if (file.isDirectory) {
+        //     flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+        // }
         
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags)
         row.add(DocumentsContract.Document.COLUMN_SIZE, file.length)
@@ -224,10 +242,19 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     }
     
     private fun getDocIdForFile(file: UsbFile): String {
-        if (file.isRoot) return "/"
-        val parent = file.parent ?: throw IllegalStateException("Parent is null for non-root file: ${file.name}")
-        val parentId = if (parent.isRoot) "" else getDocIdForFile(parent)
-        return "$parentId/${file.name}"
+        if (file.isRoot) return DEFAULT_ROOT_ID
+        // RustUsbFile might not implement parent correctly or recursion depth issue?
+        // For now, assume simplified path construction based on file.absolutePath if available or name.
+        // But Libaums UsbFile contract relies on parent.
+        // Safety check.
+        val parent = file.parent
+        return if (parent == null || parent.isRoot) {
+            // Parent is root or null (treated as root child)
+            "$DEFAULT_ROOT_ID/${file.name}"
+        } else {
+             // Safe recursion (hope no cycles)
+             "${getDocIdForFile(parent)}/${file.name}"
+        }
     }
 
     override fun deleteDocument(documentId: String) {

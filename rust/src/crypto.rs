@@ -237,6 +237,10 @@ impl BlockDecrypt for CamelliaWrapper {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AesWrapper(Aes256);
 
+impl ParBlocksSizeUser for AesWrapper {
+    type ParBlocksSize = <Aes256 as ParBlocksSizeUser>::ParBlocksSize;
+}
+
 impl KeySizeUser for AesWrapper {
     type KeySize = U32;
 }
@@ -268,6 +272,10 @@ impl BlockDecrypt for AesWrapper {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SerpentWrapper(Serpent);
 
+impl ParBlocksSizeUser for SerpentWrapper {
+    type ParBlocksSize = <Serpent as ParBlocksSizeUser>::ParBlocksSize;
+}
+
 impl KeySizeUser for SerpentWrapper {
     type KeySize = U32;
 }
@@ -298,6 +306,10 @@ impl BlockDecrypt for SerpentWrapper {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct TwofishWrapper(Twofish);
+
+impl ParBlocksSizeUser for TwofishWrapper {
+    type ParBlocksSize = <Twofish as ParBlocksSizeUser>::ParBlocksSize;
+}
 
 impl KeySizeUser for TwofishWrapper {
     type KeySize = U32;

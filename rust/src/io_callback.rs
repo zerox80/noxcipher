@@ -50,7 +50,10 @@ impl Read for CallbackReader {
         // Prepare arguments.
         // Cap length at i32::MAX to prevent overflow when calling Java
         let len = std::cmp::min(buf.len(), i32::MAX as usize) as i32;
-        let offset = self.position as i64; // overflow of i64 is possible for huge volumes > 8EB, unavoidable with JNI interface long
+        // Check for integer overflow when casting position to i64 (JNI limitation)
+        let offset: i64 = self.position.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Offset too large for JNI (max 8EB)")
+        })?;
 
         // Call Java method: byte[] read(long offset, int length)
         let result = env

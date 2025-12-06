@@ -25,12 +25,15 @@ pub struct DecryptedReader {
     // The index of the currently buffered sector.
     current_sector_index: u64,
     // Buffer to hold the decrypted data of the current sector.
-    sector_buffer: Vec<u8>,
+    // Wrapped in Option for lazy allocation to save memory when listing many files.
+    sector_buffer: Option<Vec<u8>>,
 }
 
 impl Drop for DecryptedReader {
     fn drop(&mut self) {
-        self.sector_buffer.zeroize();
+        if let Some(mut buf) = self.sector_buffer.take() {
+            buf.zeroize();
+        }
     }
 }
 
@@ -47,8 +50,8 @@ impl DecryptedReader {
             sector_size,
             // Initialize with an invalid sector index.
             current_sector_index: u64::MAX, // Invalid
-            // Allocate buffer for one sector.
-            sector_buffer: vec![0; sector_size as usize],
+            // Lazy allocation.
+            sector_buffer: None,
         }
     }
 
@@ -73,15 +76,42 @@ impl DecryptedReader {
         self.inner.seek(SeekFrom::Start(offset))?;
 
         // Read encrypted data into the buffer.
-        // Use read_exact but handle potential EOF if volume size is respected.
-        // However, AES-XTS requires full block (sector).
-        // If we can't read a full sector, we might fail or pad?
-        // VeraCrypt volumes are sector aligned.
-        self.inner.read_exact(&mut self.sector_buffer)?;
+        // Use read loop to handle potential partial reads or EOF if file is truncated.
+        // We pad with zeros if we cannot read a full sector (best effort for recovery/inspection).
+        // Ensure buffer is allocated.
+        if self.sector_buffer.is_none() {
+            self.sector_buffer = Some(vec![0u8; self.sector_size as usize]);
+        }
+        let buffer = self.sector_buffer.as_mut().unwrap();
+
+        let mut read_len = 0;
+        while read_len < buffer.len() {
+            match self.inner.read(&mut buffer[read_len..]) {
+                Ok(0) => break, // EOF
+                Ok(n) => read_len += n,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        
+        // If we read partial sector, pad the rest with zeros (already zero initialized? No, we reuse buffer).
+        // Wait, current implementation allocates buffer once in struct?
+        // Ah, `self.sector_buffer` is reused. We MUST zero out the rest if partial read.
+        if read_len < buffer.len() {
+             // For security/determinism, zero out the rest.
+             for i in read_len..buffer.len() {
+                 buffer[i] = 0;
+             }
+        }
+        // If read_len is 0 and we are truly at EOF, decrypting a zero block might be valid or not, 
+        // but read_sector is usually called when we expect data. 
+        // If we are at EOF of volume, the caller (Read impl) handles offsets. 
+        // This helper reads PHYSICAL sector.
+        // If file is truncated, we treat as zero-padded.
 
         // Decrypt the data in-place using the volume's decrypt_sector method.
         self.volume
-            .decrypt_sector(sector_index, &mut self.sector_buffer)
+            .decrypt_sector(sector_index, buffer)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Decrypt error: {}", e)))?;
 
         // Update the current sector index.
@@ -116,7 +146,8 @@ impl Read for DecryptedReader {
         let to_read = std::cmp::min(buf.len(), available);
 
         // Copy decrypted data.
-        buf[..to_read].copy_from_slice(&self.sector_buffer[offset_in_sector..offset_in_sector + to_read]);
+        let buffer = self.sector_buffer.as_ref().unwrap();
+        buf[..to_read].copy_from_slice(&buffer[offset_in_sector..offset_in_sector + to_read]);
 
         // Advance inner position properly.
         // read_sector left inner at (sector_start + sector_size).
@@ -160,6 +191,12 @@ impl SupportedFileSystem {
     pub fn list_files(&mut self, path: &str) -> io::Result<Vec<FileInfo>> {
         // Remove leading/trailing slashes from the path.
         let path = path.trim_matches('/');
+        
+        // Security: Prevent path traversal.
+        if path.contains("..") {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Path traversal detected"));
+        }
+        
         // Split the path into components.
         let components: Vec<&str> = if path.is_empty() {
             // If path is empty, it's the root directory.
@@ -335,6 +372,12 @@ impl SupportedFileSystem {
     pub fn read_file(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         // Remove leading/trailing slashes.
         let path = path.trim_matches('/');
+        
+        // Security: Prevent path traversal.
+        if path.contains("..") {
+             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Path traversal detected"));
+        }
+        
         // Split path into components.
         let components: Vec<&str> = if path.is_empty() {
             // Cannot read root as a file.

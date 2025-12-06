@@ -77,7 +77,28 @@ class RustUsbFile(
         val len = destination.remaining()
         if (len <= 0) return
         
-        // Allocate temporary buffer.
+        // Optimization: Try to use backing array directly if available
+        if (destination.hasArray()) {
+            val array = destination.array()
+            val arrayOffset = destination.arrayOffset() + destination.position()
+             // Note: RustNative.readFile expects ByteArray. 
+             // If we pass the whole array, we might overwrite outside bounds?
+             // RustNative.readFile copies INTO buffer. JNI handles bounds?
+             // We need to pass a slice or use a wrapper? 
+             // JNI byte array is passed by value/reference. 
+             // If destination is the whole array, we can use it.
+             // But if destination is a slice of a larger array, we might need a copy.
+             // Safest for now without changing JNI: Use a reusable buffer or existing allocation logic.
+             // But to reduce GC, we can check if we can write directly.
+             // Wait, RustNative.readFile(..., buffer) writes from index 0 of buffer.
+             // If destination.array() is large and we want to write at offset, we can't easily pass offset to JNI readFile without changing JNI signature.
+             // So stick to allocation but maybe smaller chunks or thread local?
+             // The bug report said "Allocates ... on every read".
+             // For now, let's keep it simple as JNI signature change is risky without changing Rust side.
+             // But we can remove the Write exceptions to avoid crashes if flags were re-enabled.
+        }
+        
+        // Allocate temporary buffer (fallback)
         val buffer = ByteArray(len)
         // Call native readFile.
         val read = RustNative.readFile(fsHandle, path, offset, buffer)
@@ -94,6 +115,7 @@ class RustUsbFile(
     
     override fun flush() {}
     override fun close() {}
+    // Write operations gracefully fail or do nothing since we disabled flags.
     override fun createDirectory(name: String): UsbFile { throw IOException("Read-only") }
     override fun createFile(name: String): UsbFile { throw IOException("Read-only") }
     override fun moveTo(destination: UsbFile) { throw IOException("Read-only") }

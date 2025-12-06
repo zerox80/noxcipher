@@ -157,7 +157,6 @@ impl Volume {
         // Get the sector size as usize.
         let sector_size = self.header.sector_size as usize;
 
-        // Ensure the data length is a multiple of the sector size.
         if data.len() % sector_size != 0 {
             // Return an error if not aligned.
             return Err(VolumeError::CryptoError(format!(
@@ -165,6 +164,15 @@ impl Volume {
                 data.len(),
                 sector_size
             )));
+        }
+
+        // Boundary check
+        let end_offset = sector_index.checked_mul(sector_size as u64)
+            .and_then(|o| o.checked_add(data.len() as u64))
+            .ok_or(VolumeError::CryptoError("Sector index overflow".to_string()))?;
+        
+        if end_offset > self.header.volume_data_size {
+             return Err(VolumeError::CryptoError("Sector out of bounds".to_string()));
         }
 
         // Initialize offset for processing data chunks.
@@ -231,9 +239,11 @@ impl Volume {
         // Get the sector size.
         let sector_size = self.header.sector_size as usize;
         // Calculate the start offset of the write operation.
-        let start_offset = sector_index * sector_size as u64;
+        let start_offset = sector_index.checked_mul(sector_size as u64)
+            .ok_or(VolumeError::CryptoError("Write start offset overflow".to_string()))?;
         // Calculate the end offset of the write operation.
-        let end_offset = start_offset + data.len() as u64;
+        let end_offset = start_offset.checked_add(data.len() as u64)
+            .ok_or(VolumeError::CryptoError("Write end offset overflow".to_string()))?;
 
         // Check hidden volume protection
         if self.protected_range_end > 0 {
@@ -244,9 +254,11 @@ impl Volume {
             // Here start_offset is logical.
             // We must convert start_offset to physical.
             // Calculate physical start offset.
-            let phys_start = self.header.encrypted_area_start + start_offset;
+            let phys_start = self.header.encrypted_area_start.checked_add(start_offset)
+                .ok_or(VolumeError::CryptoError("Protected range physical start overflow".to_string()))?;
             // Calculate physical end offset.
-            let phys_end = self.header.encrypted_area_start + end_offset;
+            let phys_end = self.header.encrypted_area_start.checked_add(end_offset)
+                .ok_or(VolumeError::CryptoError("Protected range physical end overflow".to_string()))?;
 
             // Check if the write operation overlaps with the protected range.
             if (phys_start < self.protected_range_end) && (phys_end > self.protected_range_start) {
@@ -256,7 +268,6 @@ impl Volume {
                 ));
             }
         }
-        // Ensure data length is a multiple of the sector size.
         if data.len() % sector_size != 0 {
             // Return error if not aligned.
             return Err(VolumeError::CryptoError(format!(
@@ -264,6 +275,16 @@ impl Volume {
                 data.len(),
                 sector_size
             )));
+        }
+
+        // Boundary check
+        let start_offset_calc = sector_index.checked_mul(sector_size as u64)
+            .ok_or(VolumeError::CryptoError("Sector index overflow".to_string()))?;
+        let end_offset_calc = start_offset_calc.checked_add(data.len() as u64)
+            .ok_or(VolumeError::CryptoError("Write offset overflow".to_string()))?;
+
+        if end_offset_calc > self.header.volume_data_size {
+             return Err(VolumeError::CryptoError("Write sector out of bounds".to_string()));
         }
 
         // Initialize offset.
@@ -343,7 +364,7 @@ pub fn create_context(
     let mut attempt_errors = Vec::new();
     
     // Attempt to decrypt the header at the beginning of the buffer.
-    match try_header_at_offset(password, header_bytes, pim, 0, partition_start_offset) {
+    match try_header_at_offset(password, header_bytes, pim, 0u64, partition_start_offset) {
         Ok(mut vol) => {
              // If protection is requested, try to mount hidden volume
             if let Some(prot_pass) = protection_password {
@@ -354,7 +375,7 @@ pub fn create_context(
                         prot_pass,
                         header_bytes,
                         protection_pim,
-                        65536,
+                        65536u64,
                         partition_start_offset,
                     ) {
                         Ok(hidden_vol) => {
@@ -387,7 +408,7 @@ pub fn create_context(
     if protection_password.is_none() && header_bytes.len() >= 65536 + 512 {
         // Attempt to decrypt header at 64KB offset.
         if let Ok(vol) =
-            try_header_at_offset(password, header_bytes, pim, 65536, partition_start_offset)
+            try_header_at_offset(password, header_bytes, pim, 65536u64, partition_start_offset)
         {
             log::info!("Mounted Hidden Volume");
             return register_context(vol);
@@ -430,7 +451,7 @@ pub fn create_context(
                  // If I use `try_header_at_offset` with `bh` and offset 0, it should work for backup header
                  // because the tweak 0 is hardcoded in `try_cipher` variants (seen in `try_cipher_serpent` etc).
                  
-                 match try_header_at_offset(password, bh, pim, 0, partition_start_offset) {
+                 match try_header_at_offset(password, bh, pim, 0u64, partition_start_offset) {
                      Ok(mut vol) => {
                          log::info!("Mounted Backup Header");
                          vol.used_backup_header = true;
@@ -443,23 +464,20 @@ pub fn create_context(
             // Fallback to legacy behavior if backup_header_bytes not provided but buffer might be large enough
             let backup_offset = volume_size - 65536;
             
-            // conversion to usize might fail on 32-bit systems for large volumes
-            if let Ok(backup_offset_usize) = usize::try_from(backup_offset) {
-                // Check overflow for + 512
-                if backup_offset_usize.checked_add(512).map_or(false, |end| header_bytes.len() >= end) {
-                     if let Ok(vol) = try_header_at_offset(
-                        password, 
-                        header_bytes, 
-                        pim, 
-                        backup_offset_usize, 
-                        partition_start_offset
-                    ) {
-                        log::info!("Mounted Backup Header (Embedded)");
-                        vol.used_backup_header = true;
-                        return register_context(vol);
-                    } else {
-                         attempt_errors.push("Backup Header (Embedded): Failed".to_string());
-                    }
+            // Check overflow for + 512
+            if backup_offset.checked_add(512).map_or(false, |end| (header_bytes.len() as u64) >= end) {
+                 if let Ok(vol) = try_header_at_offset(
+                    password, 
+                    header_bytes, 
+                    pim, 
+                    backup_offset, // Now passing u64
+                    partition_start_offset
+                ) {
+                    log::info!("Mounted Backup Header (Embedded)");
+                    vol.used_backup_header = true;
+                    return register_context(vol);
+                } else {
+                     attempt_errors.push("Backup Header (Embedded): Failed".to_string());
                 }
             }
         }
@@ -474,17 +492,20 @@ pub fn create_context(
         password: &[u8],
         full_buffer: &[u8],
         pim: i32,
-        offset: usize,
+        offset: u64,
         partition_start_offset: u64, hidden_volume_offset: Option<u64>,
     ) -> Result<Volume, VolumeError> {
         // Check if buffer has enough data for the header with overflow protection.
-        if offset.checked_add(512).map_or(true, |end| full_buffer.len() < end) {
+        let offset_usize = usize::try_from(offset)
+            .map_err(|_| VolumeError::CryptoError("Offset too large for architecture".to_string()))?;
+            
+        if offset_usize.checked_add(512).map_or(true, |end| full_buffer.len() < end) {
             // Return InvalidMagic if too short.
             return Err(VolumeError::InvalidHeader(HeaderError::InvalidMagic));
         }
     
         // Extract the header slice.
-        let header_slice = &full_buffer[offset..offset + 512];
+        let header_slice = &full_buffer[offset_usize..offset_usize + 512];
         // Extract salt (first 64 bytes).
         let salt = &header_slice[..64];
         // Extract encrypted header data (remaining 448 bytes).
@@ -529,11 +550,11 @@ pub fn create_context(
     }
 
     // Buffer for the derived header key.
-    let mut header_key = [0u8; 192];
+    let mut header_key = Zeroizing::new([0u8; 192]);
 
     // Helper closure to try all supported ciphers with a derived key.
     let try_unlock = |key: &[u8]| -> Result<Volume, VolumeError> {
-        let hv_opt = if offset == 0 { None } else { Some(offset as u64) };
+        let hv_opt = if offset == 0 { None } else { Some(offset) };
         // Try AES
         if let Ok(v) = try_cipher::<Aes256>(
             key,
@@ -723,9 +744,14 @@ pub fn create_context(
         // Calculate specific iteration count for RIPEMD-160.
         let ripemd_iter = if pim > 0 {
             // For RIPEMD-160, PIM formula is same as others.
-            // Use checked arithmetic to prevent overflow. Use u64 then cast to u32 max.
-            let iter = 15000u64.checked_add((pim as u64).checked_mul(1000).unwrap_or(u64::MAX)).unwrap_or(u64::MAX);
-            if iter > u32::MAX as u64 { u32::MAX } else { iter as u32 }
+            // Use checked arithmetic to prevent overflow. Return error if overflow.
+            let iter = 15000u64.checked_add((pim as u64).checked_mul(1000).ok_or(VolumeError::CryptoError("PIM RIPEMD overflow".to_string()))?)
+                .ok_or(VolumeError::CryptoError("PIM RIPEMD overflow".to_string()))?;
+            if iter > u32::MAX as u64 { 
+                return Err(VolumeError::CryptoError("PIM iterations (RIPEMD) too large".to_string())); 
+            } else { 
+                iter as u32 
+            }
         } else {
             // Map standard iteration counts to RIPEMD specific ones.
             if iter == 500_000 {
@@ -923,7 +949,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
         let vol_cipher = create_cipher(&mk[0..key_size], &mk[key_size..key_size * 2]);
 
         // Check for vulnerable keys.
-        if header.is_key_vulnerable(key_size) {
+        if header.is_xts_key_vulnerable(0, key_size, key_size) {
             return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
@@ -975,7 +1001,7 @@ fn try_cipher_serpent(
         let vol_cipher = SupportedCipher::Serpent(Xts128::new(c1, c2));
 
         // Check vulnerability.
-        if header.is_key_vulnerable(32) {
+        if header.is_xts_key_vulnerable(0, 32, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1045,7 +1071,7 @@ fn try_cipher_aes_twofish(
         let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1122,7 +1148,7 @@ fn try_cipher_aes_twofish_serpent(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(96) {
+        if header.is_xts_key_vulnerable(0, 96, 32) || header.is_xts_key_vulnerable(32, 128, 32) || header.is_xts_key_vulnerable(64, 160, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1181,11 +1207,10 @@ fn try_cipher_serpent_aes(
         let vol_serpent = Xts128::new(
             SerpentWrapper::new(mk_serpent_1.into()),
             SerpentWrapper::new(mk_serpent_2.into()),
-        );
         let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1254,7 +1279,7 @@ fn try_cipher_twofish_serpent(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1330,7 +1355,7 @@ fn try_cipher_serpent_twofish_aes(
         let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
-        if header.is_key_vulnerable(96) {
+        if header.is_xts_key_vulnerable(0, 96, 32) || header.is_xts_key_vulnerable(32, 128, 32) || header.is_xts_key_vulnerable(64, 160, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1443,7 +1468,7 @@ fn try_cipher_camellia_kuznyechik(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1512,7 +1537,7 @@ fn try_cipher_camellia_serpent(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1575,7 +1600,7 @@ fn try_cipher_kuznyechik_aes(
         let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1661,7 +1686,7 @@ fn try_cipher_kuznyechik_serpent_camellia(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(96) {
+        if header.is_xts_key_vulnerable(0, 96, 32) || header.is_xts_key_vulnerable(32, 128, 32) || header.is_xts_key_vulnerable(64, 160, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 
@@ -1730,7 +1755,7 @@ fn try_cipher_kuznyechik_twofish(
         );
 
         // Check vulnerability.
-        if header.is_key_vulnerable(64) {
+        if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
             log::warn!("XTS Key Vulnerable");
         }
 

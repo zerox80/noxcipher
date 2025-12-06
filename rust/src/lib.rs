@@ -331,27 +331,27 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             &header_bytes,
             pim,
             partition_offset as u64,
-            protection_password_bytes.as_deref(),
+            protection_password_bytes.as_deref().map(|z| z.as_slice()),
             protection_pim,
             volume_size as u64,
-            backup_header_bytes.as_deref(),
+            backup_header_bytes.as_deref().map(|z| z.as_slice()),
         );
 
+        // Explicit zeroize is redundant if we use Zeroizing, but keeping for clarity/legacy correctness
         // Import the Zeroize trait to securely clear memory.
         use zeroize::Zeroize;
         // Zeroize the password bytes in memory.
-        password_bytes.zeroize();
+        // password_bytes.zeroize(); // drop handles it
         // Zeroize header bytes.
-        header_bytes.zeroize();
+        // header_bytes.zeroize(); // drop handles it
         // If protection password bytes exist, zeroize them as well.
-        // If protection password bytes exist, zeroize them as well.
-        if let Some(ref mut pp) = protection_password_bytes {
-            pp.zeroize();
-        }
+        // if let Some(ref mut pp) = protection_password_bytes {
+        //     pp.zeroize(); // drop handles it
+        // }
         // If backup header bytes exist, zeroize them (though not critical if just ciphertext, good practice).
-        if let Some(ref mut bh) = backup_header_bytes {
-            bh.zeroize();
-        }
+        // if let Some(ref mut bh) = backup_header_bytes {
+        //     bh.zeroize(); // drop handles it
+        // }
 
         // Match on the result of create_context.
         match res {
@@ -941,7 +941,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
                 // Get the length of the buffer.
                 let len = env.get_array_length(&buf_obj).unwrap_or(0);
                 // Allocate a Rust vector of zeros with the same length.
-                let mut buf = vec![0u8; len as usize];
+                let mut buf = Zeroizing::new(vec![0u8; len as usize]);
 
                 // Read the file content into the buffer.
                 let res = match fs.read_file(&path, offset as u64, &mut buf) {
@@ -964,9 +964,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
                     Err(_) => -1,
                 };
                 
-                // Zeroize buffer
-                use zeroize::Zeroize;
-                buf.zeroize();
+                // Zeroize buffer - handled by Zeroizing
                 
                 res
             } else {
@@ -1023,10 +1021,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
             .unwrap_or_default();
             
         let old_pwd_obj = unsafe { JByteArray::from_raw(old_password) };
-        let mut old_pwd_bytes = env.convert_byte_array(&old_pwd_obj).unwrap_or_default();
+        let mut old_pwd_bytes = Zeroizing::new(env.convert_byte_array(&old_pwd_obj).unwrap_or_default());
         
         let new_pwd_obj = unsafe { JByteArray::from_raw(new_password) };
-        let mut new_pwd_bytes = env.convert_byte_array(&new_pwd_obj).unwrap_or_default();
+        let mut new_pwd_bytes = Zeroizing::new(env.convert_byte_array(&new_pwd_obj).unwrap_or_default());
         
         let res = volume::change_password(
              &path_str,
@@ -1036,9 +1034,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
              new_pim
         );
         
-        use zeroize::Zeroize;
-        old_pwd_bytes.zeroize();
-        new_pwd_bytes.zeroize();
+        // zeroize handled by Drop
         
         match res {
             Ok(_) => 0,
@@ -1072,7 +1068,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
             .unwrap_or_default();
             
         let pwd_obj = unsafe { JByteArray::from_raw(password) };
-        let mut pwd_bytes = env.convert_byte_array(&pwd_obj).unwrap_or_default();
+        let mut pwd_bytes = Zeroizing::new(env.convert_byte_array(&pwd_obj).unwrap_or_default());
         
         let res = volume::create_volume(
              &path_str,
@@ -1081,8 +1077,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
              volume_size as u64
         );
         
-        use zeroize::Zeroize;
-        pwd_bytes.zeroize();
+        // zeroize handled by Drop
         
         match res {
             Ok(_) => 0,
