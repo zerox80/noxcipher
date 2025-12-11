@@ -18,9 +18,13 @@ class NoxCipherApp : Application() {
         super.onCreate()
         
         try {
-            RustNative.initLogger()
-        } catch (e: Exception) {
-            Log.e("NoxCipherApp", "Failed to init rust logger", e)
+            if (RustNative.isInitialized) {
+                RustNative.initLogger()
+            } else {
+                Log.w("NoxCipherApp", "Rust library not initialized; skipping logger setup")
+            }
+        } catch (t: Throwable) {
+            Log.e("NoxCipherApp", "Failed to init rust logger", t)
         }
         
         // Setup global exception handler

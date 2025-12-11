@@ -32,8 +32,6 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             DocumentsContract.Root.COLUMN_DOCUMENT_ID,
             DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
         )
-            DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
-        )
         
         private object BackgroundHandler {
             private val handlerThread = android.os.HandlerThread("ContentProviderIO")
@@ -60,7 +58,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             row.add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
             row.add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
             row.add(DocumentsContract.Root.COLUMN_TITLE, context!!.getString(R.string.root_title))
-            row.add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "/")
+            row.add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, DEFAULT_ROOT_ID)
             // row.add(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES, fs.capacity - fs.occupiedSpace) // Optional
         }
         
@@ -184,9 +182,9 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             handler
         )
     }
-
+    
     private fun getFileForDocId(fs: me.jahnen.libaums.core.fs.FileSystem, docId: String): UsbFile {
-        if (docId == "/") return fs.rootDirectory
+        if (docId == DEFAULT_ROOT_ID) return fs.rootDirectory
         
         // Split path and traverse
         // docId is like "/folder/file.txt"

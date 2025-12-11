@@ -1,5 +1,7 @@
 // Import supported cipher wrappers from the crypto module.
-use crate::crypto::{CamelliaWrapper, KuznyechikWrapper, SupportedCipher};
+use crate::crypto::{
+    AesWrapper, CamelliaWrapper, KuznyechikWrapper, SerpentWrapper, SupportedCipher, TwofishWrapper,
+};
 // Import VolumeHeader and HeaderError from the header module.
 use crate::header::{HeaderError, VolumeHeader};
 // Import AES-256 cipher.
@@ -364,7 +366,14 @@ pub fn create_context(
     let mut attempt_errors = Vec::new();
     
     // Attempt to decrypt the header at the beginning of the buffer.
-    match try_header_at_offset(password, header_bytes, pim, 0u64, partition_start_offset) {
+    match try_header_at_offset(
+        password,
+        header_bytes,
+        pim,
+        0u64,
+        partition_start_offset,
+        None,
+    ) {
         Ok(mut vol) => {
              // If protection is requested, try to mount hidden volume
             if let Some(prot_pass) = protection_password {
@@ -377,6 +386,7 @@ pub fn create_context(
                         protection_pim,
                         65536u64,
                         partition_start_offset,
+                        None,
                     ) {
                         Ok(hidden_vol) => {
                             log::info!("Hidden Volume Protection Enabled");
@@ -407,9 +417,14 @@ pub fn create_context(
     // Only if NOT protecting (if protecting, we expect outer volume at 0)
     if protection_password.is_none() && header_bytes.len() >= 65536 + 512 {
         // Attempt to decrypt header at 64KB offset.
-        if let Ok(vol) =
-            try_header_at_offset(password, header_bytes, pim, 65536u64, partition_start_offset)
-        {
+        if let Ok(vol) = try_header_at_offset(
+            password,
+            header_bytes,
+            pim,
+            65536u64,
+            partition_start_offset,
+            None,
+        ) {
             log::info!("Mounted Hidden Volume");
             return register_context(vol);
         }
@@ -451,7 +466,7 @@ pub fn create_context(
                  // If I use `try_header_at_offset` with `bh` and offset 0, it should work for backup header
                  // because the tweak 0 is hardcoded in `try_cipher` variants (seen in `try_cipher_serpent` etc).
                  
-                 match try_header_at_offset(password, bh, pim, 0u64, partition_start_offset) {
+                 match try_header_at_offset(password, bh, pim, 0u64, partition_start_offset, None) {
                      Ok(mut vol) => {
                          log::info!("Mounted Backup Header");
                          vol.used_backup_header = true;
@@ -471,7 +486,8 @@ pub fn create_context(
                     header_bytes, 
                     pim, 
                     backup_offset, // Now passing u64
-                    partition_start_offset
+                    partition_start_offset,
+                    None
                 ) {
                     log::info!("Mounted Backup Header (Embedded)");
                     vol.used_backup_header = true;
@@ -1792,7 +1808,7 @@ pub fn change_password(
     file.read_exact(&mut header_bytes).map_err(|e| VolumeError::IoError(e))?;
 
     // Try to decrypt the header with the old password.
-    let volume = try_header_at_offset(old_password, &header_bytes, old_pim, 0, 0)?;
+    let volume = try_header_at_offset(old_password, &header_bytes, old_pim, 0, 0, None)?;
     
     // Generate new salt (64 bytes).
     let mut new_salt = [0u8; 64];

@@ -9,6 +9,9 @@ use jni::sys::{jbyteArray, jlong};
 use log::LevelFilter;
 // Import the panic module from the standard library to handle thread panics.
 use std::panic;
+// Pointer helpers and zeroing utilities.
+use std::ptr;
+use zeroize::Zeroizing;
 
 // Declare the volume module, which likely contains logic for handling encrypted volumes.
 mod volume;
@@ -331,6 +334,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             &header_bytes,
             pim,
             partition_offset as u64,
+            None,
             protection_password_bytes.as_deref().map(|z| z.as_slice()),
             protection_pim,
             volume_size as u64,
@@ -620,7 +624,6 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getDataOffset(
             // Return -1.
             -1
         }
-    }
     }
 }
 
@@ -982,25 +985,6 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
             -1
         }
     }
-}
-
-// Define a JNI function named Java_com_noxcipher_RustNative_closeFs.
-// It closes the file system associated with the handle.
-#[no_mangle]
-pub extern "system" fn Java_com_noxcipher_RustNative_closeFs(
-    // The JNI environment.
-    _env: JNIEnv,
-    // The Java class.
-    _class: JClass,
-    // The file system handle.
-    handle: jlong,
-) {
-    // Wrap execution in panic::catch_unwind.
-    let _ = std::panic::catch_unwind(|| {
-        if let Ok(mut lock) = FILESYSTEMS.write() {
-            lock.remove(&handle);
-        }
-    });
 }
 
 // Define a JNI function named Java_com_noxcipher_RustNative_changePassword.

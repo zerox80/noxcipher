@@ -44,6 +44,8 @@ object RustNative {
      * @param partitionOffset The offset of the partition start.
      * @param protectionPassword The protection password bytes (optional).
      * @param protectionPim The protection PIM value (0 for default).
+     * @param volumeSize Total volume size to help validate offsets.
+     * @param backupHeader Optional backup header buffer when available.
      * @return A handle to the native context, or throws exception.
      */
     external fun init(
@@ -52,7 +54,6 @@ object RustNative {
         pim: Int, 
         partitionOffset: Long, 
         protectionPassword: ByteArray?, 
-        protectionPim: Int,
         protectionPim: Int,
         volumeSize: Long,
         backupHeader: ByteArray?
@@ -118,7 +119,6 @@ object RustNative {
      * Closes the file system.
      * @param fsHandle The file system handle.
      */
-    external fun closeFs(fsHandle: Long)
     external fun closeFs(fsHandle: Long)
 
     /**
