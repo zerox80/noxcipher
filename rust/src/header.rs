@@ -120,7 +120,7 @@ impl fmt::Debug for VolumeHeader {
             .field("key_area_crc32", &self.key_area_crc32)
             // .field("master_key_data", &"<REDACTED>")
             .field("salt", &"<REDACTED>")
-            .field("pim", &self.pim)
+            .field("pim", &"<REDACTED>")
             .finish()
     }
 }
@@ -211,19 +211,24 @@ impl VolumeHeader {
         let flags = BigEndian::read_u32(&decrypted[60..64]);
         // Read the sector size (4 bytes) from offset 64.
         let mut sector_size = BigEndian::read_u32(&decrypted[64..68]);
-
         // For versions older than 5, the sector size is fixed at 512 bytes.
         // However, if the read sector size is 0 or invalid (e.g. from a fresh init), we might want to default it.
         // But if it was read as something else, we should probably respect it or fail?
         // VeraCrypt implementation forces 512 for < 5.
-        if version < 5 {
-            sector_size = 512;
+        let mut sector_size = 0;
+        if version >= 5 {
+            // Version 5+: Sector size is at offset 64
+             sector_size = BigEndian::read_u32(&decrypted[64..68]);
+             if sector_size == 0 {
+                sector_size = 512;
+            }
+        } else {
+             // Version < 5: Strictly 512 bytes
+             sector_size = 512;
         }
 
-        // Validate that the sector size is within the valid range (512 to 4096) and is a multiple of 512.
-        // VeraCrypt supports sector sizes: 512, 1024, 2048, 4096.
+        // Validate sector size
         if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 || !sector_size.is_power_of_two() {
-            // If validation fails, return an InvalidSectorSize error.
             return Err(HeaderError::InvalidSectorSize(sector_size));
         }
 
@@ -299,8 +304,12 @@ impl VolumeHeader {
         master_key_data: [u8; 256],
         salt: [u8; 64],
         pim: i32,
-    ) -> Self {
-        VolumeHeader {
+    ) -> Result<Self, String> {
+        if sector_size < 512 || sector_size > 4096 || (sector_size & (sector_size - 1)) != 0 {
+            return Err("Invalid sector size: must be power of 2 between 512 and 4096".to_string());
+        }
+
+        Ok(Self {
             version,
             min_program_version,
             crc32: 0, // Will be calculated on serialize
@@ -364,7 +373,12 @@ impl VolumeHeader {
         BigEndian::write_u32(&mut buffer[header_start + 60..header_start + 64], self.flags);
         
         // Write Sector Size (4 bytes) at offset 64.
-        BigEndian::write_u32(&mut buffer[header_start + 64..header_start + 68], self.sector_size);
+        // Write Sector Size at 64 (Always write it if we support > 512, strict VC might ignore it if ver < 5)
+        // Strictly speaking, if ver < 5, this area is reserved/undefined. Writing 0 or 512 is safe?
+        // Let's write it only if ver >= 5 to be compliant.
+        if self.version >= 5 {
+             BigEndian::write_u32(&mut buffer[header_start + 64..header_start + 68], self.sector_size);
+        }
         
         // Write Key Area (256 bytes) at offset 192 (header_start + 192).
         buffer[header_start + 192..header_start + 448].copy_from_slice(&self.master_key_data);

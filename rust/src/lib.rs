@@ -23,6 +23,8 @@ mod header;
 mod io_callback;
 // Declare the filesystem module, which likely handles file system operations.
 mod filesystem;
+#[cfg(test)]
+mod test_fixes;
 
 // Import SupportedFileSystem and DecryptedReader types from the filesystem module.
 use filesystem::{DecryptedReader, SupportedFileSystem};
@@ -225,11 +227,12 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
     pim: jni::sys::jint,
     // The partition offset.
     partition_offset: jlong,
+    // The header offset (physical offset where header data starts).
+    header_offset: jlong,
     // The protection password (optional) as a byte array.
     protection_password: jbyteArray,
     // The protection PIM value.
     protection_pim: jni::sys::jint,
-    // The total volume size (for safety checks).
     // The total volume size (for safety checks).
     volume_size: jlong,
     // The backup header data as a byte array (optional).
@@ -250,6 +253,28 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
              let _ = env.throw_new("java/lang/IllegalArgumentException", "Header cannot be null");
              return -1;
         }
+
+        // Validate positive offsets and sizes
+        let partition_offset_u64 = u64::try_from(partition_offset).map_err(|_| "Negative partition offset")
+             .unwrap_or_else(|_| {
+                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative partition offset");
+                 u64::MAX // Sentinel, execution will stop
+             });
+        if partition_offset_u64 == u64::MAX { return -1; }
+
+        let header_offset_u64 = u64::try_from(header_offset).map_err(|_| "Negative header offset")
+             .unwrap_or_else(|_| {
+                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative header offset");
+                 u64::MAX 
+             });
+        if header_offset_u64 == u64::MAX { return -1; }
+
+        let volume_size_u64 = u64::try_from(volume_size).map_err(|_| "Negative volume size")
+             .unwrap_or_else(|_| {
+                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative volume size");
+                 u64::MAX 
+             });
+        if volume_size_u64 == u64::MAX { return -1; }
 
         // Convert the raw JByteArray password to a JByteArray object unsafely.
         let password_obj = unsafe { JByteArray::from_raw(password) };
@@ -322,22 +347,18 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             None
         };
 
-        if partition_offset < 0 {
-            let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative partition offset");
-            return -1;
-        }
-
         // Call the volume::create_context function to attempt to mount the volume.
         // Pass references to the password, header, and other parameters.
         let res = volume::create_context(
             &password_bytes,
             &header_bytes,
             pim,
-            partition_offset as u64,
+            partition_offset_u64,
             None,
+            header_offset_u64,
             protection_password_bytes.as_deref().map(|z| z.as_slice()),
             protection_pim,
-            volume_size as u64,
+            volume_size_u64,
             backup_header_bytes.as_deref().map(|z| z.as_slice()),
         );
 
@@ -423,6 +444,19 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 ) {
     // Wrap execution in panic::catch_unwind.
     let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if data.is_null() {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Data buffer cannot be null");
+            return;
+        }
+
+        let offset_u64 = match u64::try_from(offset) {
+            Ok(o) => o,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative offset");
+                 return;
+            }
+        };
+
         // Convert the raw JByteArray to a JByteArray object unsafely.
         let data_obj = unsafe { JByteArray::from_raw(data) };
         // Get the length of the Java array.
@@ -460,7 +494,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
         }
 
         // Perform the decryption operation using the volume module.
-        if let Err(e) = volume::decrypt(handle, offset as u64, &mut buf) {
+        if let Err(e) = volume::decrypt(handle, offset_u64, &mut buf) {
             // If decryption fails, throw an IOException.
             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
             // Return early.
@@ -506,6 +540,19 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
 ) {
     // Wrap execution in panic::catch_unwind.
     let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if data.is_null() {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Data buffer cannot be null");
+            return;
+        }
+
+        let offset_u64 = match u64::try_from(offset) {
+            Ok(o) => o,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative offset");
+                 return;
+            }
+        };
+
         // Convert the raw JByteArray to a JByteArray object unsafely.
         let data_obj = unsafe { JByteArray::from_raw(data) };
         // Get the length of the Java array.
@@ -543,7 +590,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
         }
 
         // Perform the encryption operation using the volume module.
-        if let Err(e) = volume::encrypt(handle, offset as u64, &mut buf) {
+        if let Err(e) = volume::encrypt(handle, offset_u64, &mut buf) {
             // If encryption fails, throw an IOException.
             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
             // Return early.

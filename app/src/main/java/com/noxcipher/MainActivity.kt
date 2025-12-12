@@ -188,7 +188,7 @@ class MainActivity : AppCompatActivity() {
                     connectDevice(device, passwordBytes, pim)
                     
                     // Clear password bytes (best effort)
-                    passwordBytes.fill(0)
+                    // Password bytes cleared in ViewModel finally block
                     
                     // Clear UI immediately
                     passwordText.clear()
@@ -220,7 +220,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.VISIBLE
         setInputsEnabled(false)
         // ViewModel handles device selection internally using libaums
-        viewModel.connectDevice(usbManager, passwordBytes, pim)
+        viewModel.connectDevice(usbManager, passwordBytes, pim, device)
     }
 
     private fun setInputsEnabled(enabled: Boolean) {

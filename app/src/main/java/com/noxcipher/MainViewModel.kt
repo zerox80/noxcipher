@@ -249,13 +249,215 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val volSize = try {
                                 physicalDriver.blocks.toLong() * physicalDriver.blockSize
                             } catch (e: Exception) {
+```kotlin
+    private val _logs = MutableSharedFlow<String>()
+    val logs = _logs.asSharedFlow()
+
+    // Function to connect to a USB device and mount the encrypted volume.
+    fun connectDevice(
+        usbManager: UsbManager, 
+        password: ByteArray,
+        pim: Int,
+        specificDevice: UsbDevice? = null, // Optional specific device to connect to
+        protectionPassword: ByteArray? = null,
+        protectionPim: Int = 0
+    ) {
+        // ... (job cancel)
+        
+        connectionJob = viewModelScope.launch(Dispatchers.IO) {
+            connectionMutex.withLock {
+                try {
+                    closeConnection()
+                    
+                    val devices = UsbMassStorageDevice.getMassStorageDevices(context)
+                    if (devices.isEmpty()) {
+                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_mass_storage)))
+                        return@withLock
+                    }
+                    
+                    // Filter by specific device if provided
+                    val selectedDevice = if (specificDevice != null) {
+                        devices.find { it.usbDevice == specificDevice }
+                    } else {
+                        devices[0]
+                    }
+                    
+                    if (selectedDevice == null) {
+                         _connectionResult.emit(ConnectionResult.Error("Selected device not found in Mass Storage list"))
+                         return@withLock
+                    }
+                    
+                    val device = selectedDevice
+                    device.init()
+                    activeDevice = device
+                    
+                    // Try to get partitions from libaums.
+                    // We cast to BlockDeviceDriver list because Partition implements it (usually)
+                    // or we map it if needed. In 0.10.0 Partition implements BlockDeviceDriver.
+                    var partitions: List<me.jahnen.libaums.core.driver.BlockDeviceDriver> = device.partitions
+                    
+                    var rawDriver: me.jahnen.libaums.core.driver.BlockDeviceDriver? = null
+                    
+                    // Fallback: Manual GPT/MBR parsing if no partitions found.
+                    if (partitions.isEmpty()) {
+                        val debugSb = StringBuilder()
+                        
+                        try {
+                            // blockDevice field is missing, try to create ScsiBlockDevice manually.
+                            // 1. Get UsbCommunication via reflection.
+                            val commField = UsbMassStorageDevice::class.java.getDeclaredField("usbCommunication")
+                            commField.isAccessible = true
+                            val comm = commField.get(device)
+                            
+                            if (comm != null) {
+                                // 2. Instantiate ScsiBlockDevice via reflection.
+                                try {
+                                    val scsiClass = Class.forName("me.jahnen.libaums.core.driver.scsi.ScsiBlockDevice")
+                                    // Try to find constructor that takes UsbCommunication.
+                                    val constructors = scsiClass.constructors
+                                    var constructor = constructors.find { 
+                                        it.parameterTypes.size == 1 && 
+                                        it.parameterTypes[0].isAssignableFrom(comm.javaClass) 
+                                    }
+                                    
+                                    if (constructor == null) {
+                                        // Try constructor with more args if single-arg one not found.
+                                         constructor = constructors.find { 
+                                            it.parameterTypes.isNotEmpty() && 
+                                            it.parameterTypes[0].isAssignableFrom(comm.javaClass) 
+                                        }
+                                    }
+                                    
+                                    if (constructor != null) {
+                                        val args = arrayOfNulls<Any>(constructor.parameterCount)
+                                        args[0] = comm
+                                        
+                                        // Fill other args with defaults.
+                                        val params = constructor.parameterTypes
+                                        for (i in 1 until params.size) {
+                                            if (params[i] == Byte::class.javaPrimitiveType || params[i] == Byte::class.java) {
+                                                args[i] = 0.toByte()
+                                            } else if (params[i] == Int::class.javaPrimitiveType || params[i] == Int::class.java) {
+                                                args[i] = 0
+                                            } else if (params[i] == Long::class.javaPrimitiveType || params[i] == Long::class.java) {
+                                                args[i] = 0L
+                                            } else if (params[i] == Boolean::class.javaPrimitiveType || params[i] == Boolean::class.java) {
+                                                args[i] = false
+                                            }
+                                        }
+                                        
+                                        // Create new instance and initialize it.
+                                        rawDriver = constructor.newInstance(*args) as me.jahnen.libaums.core.driver.BlockDeviceDriver
+                                        rawDriver.init()
+                                    } else {
+                                        debugSb.append("\nNo suitable ScsiBlockDevice constructor found.")
+                                        debugSb.append("\nConstructors: ")
+                                        constructors.forEach { c ->
+                                            debugSb.append(c.parameterTypes.joinToString { it.simpleName }).append("; ")
+                                        }
+                                    }
+                                } catch (e: ClassNotFoundException) {
+                                    debugSb.append("\nScsiBlockDevice class not found.")
+                                }
+                            } else {
+                                debugSb.append("\nUsbCommunication is null.")
+                            }
+                            
+                            if (rawDriver != null) {
+                                // Try parsing GPT first.
+                                var manualPartitions = com.noxcipher.util.PartitionUtils.parseGpt(rawDriver)
+                                if (manualPartitions.isEmpty()) {
+                                    // Try parsing MBR if GPT fails.
+                                    manualPartitions = com.noxcipher.util.PartitionUtils.parseMbr(rawDriver)
+                                }
+                                
+                                // If manual parsing succeeded, use those partitions.
+                                if (manualPartitions.isNotEmpty()) {
+                                    partitions = manualPartitions
+                                }
+                            }
+                        } catch (e: Exception) {
+                            debugSb.append("\nManual driver creation fail: ${e.javaClass.simpleName} ${e.message}")
+                            e.printStackTrace()
+                        }
+                        
+                        // If still no partitions, log debug info and fail.
+                        if (partitions.isEmpty()) {
+                             val sb = StringBuilder()
+                             sb.append("No partitions.")
+                             sb.append(debugSb.toString())
+                             
+                             if (rawDriver != null) {
+                                 try {
+                                     // Read first sector for debugging.
+                                     val debugBuf = ByteBuffer.allocate(512)
+                                     rawDriver.read(0, debugBuf)
+                                     val bytes = debugBuf.array()
+                                     val sig1 = bytes[510]
+                                     val sig2 = bytes[511]
+                                     val first16 = bytes.take(16).joinToString(" ") { "%02X".format(it) }
+                                     sb.append("\nMBR Sig: %02X %02X".format(sig1, sig2))
+                                     sb.append("\nStart: ").append(first16)
+                                 } catch (e: Exception) {
+                                     sb.append("\nRead fail: ${e.message}")
+                                 }
+                             }
+                            _connectionResult.emit(ConnectionResult.Error(sb.toString()))
+                            return@withLock
+                        }
+                    }
+                    
+                    // Iterate over partitions and try to unlock.
+                    var success = false
+                    var lastError: String? = null
+
+                    // If no partitions found, try the raw device itself.
+                    // UsbMassStorageDevice is not a BlockDeviceDriver, but it has one.
+                    // We need to access it. It might be private or accessible via property.
+                    // Assuming blockDevice is accessible or we use the rawDriver we created manually if any.
+                    
+                    val rawTarget = if (partitions.isEmpty()) {
+                         // If we created a manual rawDriver, use it.
+                         // Otherwise try to get from device.
+                         // Note: libaums UsbMassStorageDevice might not expose blockDevice publicly in all versions.
+                         // But we can try.
+                         // For now, let's assume we can use the manual 'rawDriver' if partitions is empty.
+                         // If rawDriver is null, we can't do much.
+                         if (rawDriver != null) listOf(rawDriver) else emptyList()
+                    } else {
+                        emptyList<me.jahnen.libaums.core.driver.BlockDeviceDriver>()
+                    }
+                    
+                    // Determine targets to try: partitions or raw device.
+                    val targets = if (partitions.isNotEmpty()) partitions else rawTarget
+
+                    for (partition in targets) {
+                        try {
+                            val physicalDriver = partition
+                            
+                            // We need to try 3 candidates for the volume header:
+                            // 1. Primary Header (Offset 0)
+                            // 2. Backup Header (Offset VolumeSize - 128KB)
+                            // 3. Hidden Volume Header (Offset VolumeSize - 64KB)
+                            // VeraCrypt:
+                            // Primary: 0
+                            // Backup: VolumeSize - 131072 (128KB)
+                            // Hidden: VolumeSize - 65536 (64KB)
+                            
+                            // Get volume size.
+                            // libaums BlockDeviceDriver has `blocks` and `blockSize`.
+                            // But `blocks` might be 0 for some raw devices.
+                            val volSize = try {
+                                physicalDriver.blocks.toLong() * physicalDriver.blockSize
+                            } catch (e: Exception) {
                                 0L
                             }
                             
                             // Prepare list of header candidates.
                             val candidates = mutableListOf<Pair<Long, String>>()
                             candidates.add(0L to "Primary")
-                            candidates.add(65536L to "Hidden") // This seems to be a check for hidden volume at start? Standard hidden volume header is at 64KB.
+                            // Hidden volume at 65536 is checked automatically by Rust when passing buffer from Primary offset if large enough.
+
                             
                             if (volSize > 131072) {
                                 candidates.add((volSize - 131072) to "Backup")
@@ -332,14 +534,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         if (index > 0) _logs.emit("Trying trimmed password...")
                                         
                                         // DEBUG: Log password hex to verify encoding
-                                        val hexPwd = pwd.joinToString("") { "%02X".format(it) }
-                                        _logs.emit("Pass Hex: $hexPwd")
+                                        // Logging removed for security
 
                                         handle = RustNative.init(
                                             pwd,
                                             headerBytes,
                                             pim,
                                             partitionOffset,
+                                            offset, // Pass current scan offset as header offset bias
                                             protectionPassword,
                                             protectionPim,
                                             volSize,

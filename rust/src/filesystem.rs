@@ -14,7 +14,7 @@ use ntfs::{Ntfs, NtfsReadSeek};
 use zeroize::Zeroize;
 
 // Struct representing a reader that decrypts data on the fly.
-#[derive(Clone)]
+// structure definition without Clone derive
 pub struct DecryptedReader {
     // The underlying reader (CallbackReader) that provides raw encrypted data.
     inner: CallbackReader,
@@ -33,6 +33,19 @@ impl Drop for DecryptedReader {
     fn drop(&mut self) {
         if let Some(mut buf) = self.sector_buffer.take() {
             buf.zeroize();
+        }
+    }
+}
+
+impl Clone for DecryptedReader {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            volume: self.volume.clone(),
+            sector_size: self.sector_size,
+            // Reset state in clone to avoid stale buffer/index and unnecessary allocation
+            current_sector_index: u64::MAX,
+            sector_buffer: None,
         }
     }
 }

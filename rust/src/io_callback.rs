@@ -4,6 +4,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use jni::objects::{GlobalRef, JValue};
 use jni::JavaVM;
 use std::sync::Arc;
+use std::ops::Deref;
 
 // Import zeroize trait.
 use zeroize::Zeroize;
@@ -14,7 +15,7 @@ pub struct CallbackReader {
     // Java VM instance to attach threads.
     jvm: Arc<JavaVM>,
     // Global reference to the Java callback object.
-    callback_obj: GlobalRef,
+    callback_obj: Arc<GlobalRef>,
     // Current read position.
     position: u64,
     // Total size of the data source.
@@ -27,7 +28,7 @@ impl CallbackReader {
     pub fn new(jvm: JavaVM, callback_obj: GlobalRef, volume_size: u64) -> Self {
         Self {
             jvm: Arc::new(jvm),
-            callback_obj,
+            callback_obj: Arc::new(callback_obj),
             position: 0,
             volume_size,
         }

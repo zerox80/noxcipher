@@ -53,6 +53,7 @@ object RustNative {
         header: ByteArray, 
         pim: Int, 
         partitionOffset: Long, 
+        headerOffset: Long,
         protectionPassword: ByteArray?, 
         protectionPim: Int,
         volumeSize: Long,
