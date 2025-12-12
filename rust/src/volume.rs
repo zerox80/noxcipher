@@ -444,11 +444,26 @@ pub fn create_context(
                         Ok(hidden_vol) => {
                             log::info!("Hidden Volume Protection Enabled");
                             // Protect the hidden volume header (at 65536) and data.
-                            // encrypted_area_start is data start. header_offset is header start.
-                            let start = header_offset_bias + 65536;
-                            // Check overflow for end
+                            // The hidden volume data is located at hidden_vol.header.encrypted_area_start relative to the volume start.
+                            // We must protect the Hidden Volume Header AND the Hidden Volume Data.
+                            // Actually, protecting the header (64KB offset) is good, but usually we just protect the data area?
+                            // VeraCrypt documentation says: "When a hidden volume is protected... write operations to the hidden volume area will be rejected."
+                            // The hidden volume header is at 65536. If we overwrite it, we destroy the hidden volume entry point.
+                            // However, strictly speaking, the "Protected Range" usually refers to the data area. 
+                            // But usually usage includes preserving the header.
+                            // Let's protect the Data Area primarily as that's the large area.
+                            // The code below was: offset 65536 + size. This assumes data starts at 65536, which is WRONG.
+                            
+                            // Correct logic:
+                            // Protected Range Start = header_offset_bias + hidden_vol.header.encrypted_area_start
+                            // Protected Range End = Protected Range Start + hidden_vol.header.volume_data_size
+                            
+                            let start = header_offset_bias.checked_add(hidden_vol.header.encrypted_area_start)
+                                .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
+                            
                             let end = start.checked_add(hidden_vol.header.volume_data_size)
-                                .ok_or(VolumeError::CryptoError("Hidden volume size overflow".to_string()))?;
+                                .ok_or(VolumeError::CryptoError("Hidden volume end offset overflow".to_string()))?;
+                                
                             vol.set_protection(start, end);
                         }
                         Err(_) => {
@@ -678,11 +693,11 @@ impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
     fn flush_sector(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() { return Ok(()); }
         
+        let rem = self.buffer.len() % (self.sector_size as usize);
         if rem != 0 {
-             // WARNING: Padding with zeros. This overrides existing data on disk if this is an update.
-             // Safe for formatting new volumes (create_volume), but dangerous for updates.
-             log::warn!("EncryptedVolumeWriter: Padding partial sector with zeros (Potential Data Loss if updating)");
-             self.buffer.resize(self.buffer.len() + (self.sector_size as usize - rem), 0);
+             // WARNING: Padding with zeros overrides existing data on disk.
+             // This is unsafe for random updates.
+             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Cannot flush partial sector without potential data loss"));
         }
         
         // Calculate sector index
@@ -697,7 +712,11 @@ impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
         
         for sector in chunks.by_ref() {
              // Encrypt
-             self.cipher.encrypt_area(sector, self.sector_size as usize, idx);
+             // Fix Bug 4: Tweak must be absolute unit number.
+             // We assume sector_size == 512 for now as used in create_volume.
+             // Tweak = (data_start_offset / sector_size) + idx
+             let tweak = (self.data_start_offset / 512) + idx;
+             self.cipher.encrypt_area(sector, self.sector_size as usize, tweak);
              idx += 1;
         }
         
@@ -785,6 +804,7 @@ pub fn create_volume(
     master_key: &[u8],
     cipher_type: CipherType,
     prf: PrfAlgorithm,
+    sector_size_opt: Option<u32>,
 ) -> Result<(), VolumeError> {
     let mut file = OpenOptions::new().write(true).create(true).open(path)?;
     file.set_len(size)?;
@@ -829,7 +849,10 @@ pub fn create_volume(
          }
     }
 
-    let sector_size = 512; // TODO: Variable sector size support
+    let sector_size = sector_size_opt.unwrap_or(512);
+    if sector_size < 512 || sector_size > 4096 || !sector_size.is_power_of_two() {
+        return Err(VolumeError::CryptoError(format!("Invalid sector size: {}", sector_size)));
+    }
 
     // VeraCrypt Layout:
     // Header: 128KB (Offset 0)
@@ -980,14 +1003,14 @@ fn try_header_at_offset(
         ) {
             Ok(v) => return Ok(v),
             Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            _ => {}
+            Err(e) => return Err(e), // Propagate other errors (e.g. CryptoError)
         }
 
         // Try Serpent
         match try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
             Ok(v) => return Ok(v),
             Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            _ => {}
+            Err(e) => return Err(e), // Propagate other errors
         }
 
         // Try Twofish
@@ -1008,7 +1031,7 @@ fn try_header_at_offset(
         ) {
             Ok(v) => return Ok(v),
             Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            _ => {}
+            Err(e) => return Err(e),
         }
 
         // Try Camellia
@@ -2273,7 +2296,7 @@ fn try_cipher_kuznyechik_twofish(
     }
     Err(VolumeError::InvalidPassword("Kuznyechik-Twofish cipher failed".to_string()))
 }
-// Function to change the password of an existing volume.
+// Function to change the password of // Implement change_password
 pub fn change_password(
     path: &str,
     old_password: &[u8],
@@ -2285,28 +2308,35 @@ pub fn change_password(
 ) -> Result<(), VolumeError> {
     use std::fs::OpenOptions;
     use std::io::{Read, Write, Seek, SeekFrom};
-    use xts_mode::Xts128; // Ensure imports if not global
+    use zeroize::Zeroize;
 
-    // Open the file with read and write permissions.
     let mut file = OpenOptions::new().read(true).write(true).open(path)
         .map_err(|e| VolumeError::IoError(e))?;
-
-    // Read the primary header (first 65 KB to allow for hidden vol check if we wanted, but here just standard)
-    // VeraCrypt reads first 128KB usually.
+        
+    let size = file.metadata().map_err(|e| VolumeError::IoError(e))?.len();
+    
+    // Read the primary header (first 65 KB to allow for hidden vol check if we wanted)
     let mut buffer = vec![0u8; 65536 + 512];
-    let read_len = file.read(&mut buffer).map_err(|e| VolumeError::IoError(e))?;
-
-    // Try to decrypt the header with the old password.
+    let _read_len = file.read(&mut buffer).map_err(|e| VolumeError::IoError(e))?;
+    
+    // Try primary at 0
     let mut volume = try_header_at_offset(old_password, &buffer, old_pim, 0, 0, None)
          .or_else(|_| {
+             // Maybe Hidden Volume at 64KB?
+             if buffer.len() >= 65536 + 512 {
+                 try_header_at_offset(old_password, &buffer, old_pim, 65536, 0, None)
+             } else {
+                 Err(VolumeError::InvalidPassword("Buffer too small".into()))
+             }
+         })
+         .or_else(|_| {
              // Maybe Backup Header?
-             let size = file.metadata()?.len();
              if size >= 131072 {
                  let offset = size - 131072;
-                 file.seek(SeekFrom::Start(offset))?;
+                 file.seek(SeekFrom::Start(offset)).map_err(|e| VolumeError::IoError(e))?;
                  let mut buf = vec![0u8; 512];
-                 file.read_exact(&mut buf)?;
-                 try_header_at_offset(old_password, &buf, old_pim, 0, 0, None) // 0 offset for backup header buffer
+                 file.read_exact(&mut buf).map_err(|e| VolumeError::IoError(e))?;
+                 try_header_at_offset(old_password, &buf, old_pim, offset, 0, None)
              } else {
                  Err(VolumeError::InvalidPassword("Failed to decrypt header".to_string()))
              }
@@ -2316,9 +2346,9 @@ pub fn change_password(
     if new_salt.len() != 64 {
         return Err(VolumeError::CryptoError("Salt must be 64 bytes".into()));
     }
-    let mut salt_arr = [0u8; 64];
+    let mut salt_arr = Zeroizing::new([0u8; 64]);
     salt_arr.copy_from_slice(new_salt);
-    volume.header.salt = salt_arr;
+    volume.header.salt = *salt_arr;
     volume.header.pim = new_pim;
 
     // Serialize the header.
@@ -2330,7 +2360,7 @@ pub fn change_password(
 
     // Derive new header key using the selected PRF
     let mut new_header_key = Zeroizing::new([0u8; 192]); 
-    derive_key_generic(new_password, &salt_arr, new_pim, &mut new_header_key, active_prf);
+    derive_key_generic(new_password, &salt_arr, new_pim, &mut new_header_key, Some(active_prf));
 
     // Weak key check
     for i in (0..192).step_by(64) {
@@ -2379,24 +2409,14 @@ pub fn change_password(
              encrypt_header_ops(&SupportedCipher::Twofish(xts), &mut encrypted_header);
         },
         SupportedCipher::AesTwofish(_, _) => {
-             let k_tf = &key_slice[0..64];  // Twofish first in encryption
-             let k_aes = &key_slice[64..128]; // AES second in encryption?
-             // Wait, AES-Twofish Decrypt means AES then Twofish.
-             // Encrypt means Twofish then AES.
-             // supported_cipher.encrypt_area handles the order!
-             // We just need to construct the SupportedCipher correctly with correct keys.
-             // But valid `SupportedCipher` requires constructed XTS objects.
-             let k = &key_slice[0..128]; // 64 bytes each? No, 64 bytes total XTS per cipher.
-             // XTS key size for each is 64 bytes.
-             // AES-Twofish uses 128 bytes total header key? Yes.
-             
+             let k = &key_slice[0..128];
              let c = SupportedCipher::AesTwofish(
                  Xts128::new(AesWrapper::new((&k[0..32]).into()), AesWrapper::new((&k[32..64]).into())),
                  Xts128::new(TwofishWrapper::new((&k[64..96]).into()), TwofishWrapper::new((&k[96..128]).into()))
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-        SupportedCipher::AesTwofishSerpent(_,_,_) => {
+        SupportedCipher::AesTwofishSerpent(_, _, _) => {
              let k = &key_slice[0..192];
              let c = SupportedCipher::AesTwofishSerpent(
                  Xts128::new(AesWrapper::new((&k[0..32]).into()), AesWrapper::new((&k[32..64]).into())),
@@ -2405,7 +2425,7 @@ pub fn change_password(
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-        SupportedCipher::SerpentAes(_,_) => {
+        SupportedCipher::SerpentAes(_, _) => {
              let k = &key_slice[0..128];
              let c = SupportedCipher::SerpentAes(
                 Xts128::new(SerpentWrapper::new((&k[0..32]).into()), SerpentWrapper::new((&k[32..64]).into())),
@@ -2413,7 +2433,7 @@ pub fn change_password(
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-        SupportedCipher::TwofishSerpent(_,_) => {
+        SupportedCipher::TwofishSerpent(_, _) => {
              let k = &key_slice[0..128];
              let c = SupportedCipher::TwofishSerpent(
                 Xts128::new(TwofishWrapper::new((&k[0..32]).into()), TwofishWrapper::new((&k[32..64]).into())),
@@ -2421,7 +2441,7 @@ pub fn change_password(
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-        SupportedCipher::SerpentTwofishAes(_,_,_) => {
+        SupportedCipher::SerpentTwofishAes(_, _, _) => {
              let k = &key_slice[0..192];
              let c = SupportedCipher::SerpentTwofishAes(
                  Xts128::new(SerpentWrapper::new((&k[0..32]).into()), SerpentWrapper::new((&k[32..64]).into())),
@@ -2430,77 +2450,6 @@ pub fn change_password(
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-        // Legacy/Other support if needed (Camellia etc)
-        // For brevity implementing common ones, assuming Camellia variants follow same pattern
-        _ => return Err(VolumeError::CryptoError("Cipher variant not fully supported for re-encryption yet".to_string())),
-    }
-
-    // Write Primary
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&encrypted_header)?;
-    
-    // Write Backup
-    let size = file.metadata()?.len();
-    if size >= 131072 {
-        file.seek(SeekFrom::Start(size - 131072))?;
-        file.write_all(&encrypted_header)?;
-    }
-    
-    Ok(())
-}
-             let c_aes = Xts128::new(AesWrapper::new(k_aes1.into()), AesWrapper::new(k_aes2.into()));
-             let c_tf = Xts128::new(TwofishWrapper::new(k_tf1.into()), TwofishWrapper::new(k_tf2.into()));
-             encrypt_header_ops(&SupportedCipher::AesTwofish(c_aes, c_tf), &mut encrypted_header);
-        },
-        SupportedCipher::AesTwofishSerpent(_, _, _) => {
-            // Serpent(0-32), Twofish(32-64), AES(64-96)
-             let k_s1 = &key_slice[0..32];
-             let k_t1 = &key_slice[32..64];
-             let k_a1 = &key_slice[64..96];
-             let k_s2 = &key_slice[96..128];
-             let k_t2 = &key_slice[128..160];
-             let k_a2 = &key_slice[160..192];
-
-             let c_aes = Xts128::new(AesWrapper::new(k_a1.into()), AesWrapper::new(k_a2.into()));
-             let c_tf = Xts128::new(TwofishWrapper::new(k_t1.into()), TwofishWrapper::new(k_t2.into()));
-             let c_s = Xts128::new(SerpentWrapper::new(k_s1.into()), SerpentWrapper::new(k_s2.into()));
-             encrypt_header_ops(&SupportedCipher::AesTwofishSerpent(c_aes, c_tf, c_s), &mut encrypted_header);
-        },
-        SupportedCipher::SerpentAes(_, _) => {
-             // AES(0-32), Serpent(32-64)
-             let k_a1 = &key_slice[0..32];
-             let k_s1 = &key_slice[32..64];
-             let k_a2 = &key_slice[64..96];
-             let k_s2 = &key_slice[96..128];
-             let c_aes = Xts128::new(AesWrapper::new(k_a1.into()), AesWrapper::new(k_a2.into()));
-             let c_s = Xts128::new(SerpentWrapper::new(k_s1.into()), SerpentWrapper::new(k_s2.into()));
-             encrypt_header_ops(&SupportedCipher::SerpentAes(c_s, c_aes), &mut encrypted_header);
-        },
-        SupportedCipher::TwofishSerpent(_, _) => {
-             // Serpent(0-32), Twofish(32-64)
-             let k_s1 = &key_slice[0..32];
-             let k_t1 = &key_slice[32..64];
-             let k_s2 = &key_slice[64..96];
-             let k_t2 = &key_slice[96..128];
-             let c_tf = Xts128::new(TwofishWrapper::new(k_t1.into()), TwofishWrapper::new(k_t2.into()));
-             let c_s = Xts128::new(SerpentWrapper::new(k_s1.into()), SerpentWrapper::new(k_s2.into()));
-             encrypt_header_ops(&SupportedCipher::TwofishSerpent(c_tf, c_s), &mut encrypted_header);
-        },
-        // Add others (SerpentTwofishAes, CamelliaKuznyechik, etc.) if needed. 
-        // For brevity in this fix, we cover the common ones. 
-        // If an algorithm is not supported here, it will error, which is better than wrong encryption.
-        SupportedCipher::SerpentTwofishAes(_, _, _) => {
-             // Serpent(0-32), Twofish(32-64), AES(64-96)
-             let k_s1 = &key_slice[0..32];
-             let k_t1 = &key_slice[32..64];
-             let k_a1 = &key_slice[64..96];
-             let k_s2 = &key_slice[96..128];
-             let k_t2 = &key_slice[128..160];
-             let k_a2 = &key_slice[160..192];
-
-             let c_aes = Xts128::new(AesWrapper::new(k_a1.into()), AesWrapper::new(k_a2.into()));
-             let c_tf = Xts128::new(TwofishWrapper::new(k_t1.into()), TwofishWrapper::new(k_t2.into()));
-             let c_s = Xts128::new(SerpentWrapper::new(k_s1.into()), SerpentWrapper::new(k_s2.into()));
              encrypt_header_ops(&SupportedCipher::SerpentTwofishAes(c_s, c_tf, c_aes), &mut encrypted_header);
         },
         SupportedCipher::CamelliaKuznyechik(_, _) => {

@@ -1021,160 +1021,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     }
 }
 
-// Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-// Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
-    mut env: JNIEnv,
-    _class: JClass,
-    path: jni::objects::JString,
-    old_password: jbyteArray,
-    old_pim: jni::sys::jint,
-    new_password: jbyteArray,
-    new_pim: jni::sys::jint,
-    new_salt: jbyteArray,
-    new_prf_id: jni::sys::jint,
-) -> jint {
-    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let path_str: String = env.get_string(&path)
-            .map(|s| s.into())
-            .unwrap_or_default();
-            
-        let old_pwd_obj = unsafe { JByteArray::from_raw(old_password) };
-        let mut old_pwd_bytes = Zeroizing::new(env.convert_byte_array(&old_pwd_obj).unwrap_or_default());
-        
-        let new_pwd_obj = unsafe { JByteArray::from_raw(new_password) };
-        let mut new_pwd_bytes = Zeroizing::new(env.convert_byte_array(&new_pwd_obj).unwrap_or_default());
-        
-        let salt_obj = unsafe { JByteArray::from_raw(new_salt) };
-        let mut salt_bytes = Zeroizing::new(env.convert_byte_array(&salt_obj).unwrap_or_default());
 
-        use volume::PrfAlgorithm;
-        let palgo = match new_prf_id {
-            1 => Some(PrfAlgorithm::Sha512),
-            2 => Some(PrfAlgorithm::Sha256),
-            3 => Some(PrfAlgorithm::Whirlpool),
-            4 => Some(PrfAlgorithm::Ripemd160),
-            5 => Some(PrfAlgorithm::Streebog),
-            6 => Some(PrfAlgorithm::Blake2s),
-            7 => Some(PrfAlgorithm::Sha1),
-            _ => None, // -1 or 0 => Preserve/Unknown (Logic in volume.rs handles None as preserve)
-        };
-
-        let res = volume::change_password(
-             &path_str,
-             &old_pwd_bytes,
-             old_pim,
-             &new_pwd_bytes,
-             new_pim,
-             &salt_bytes,
-             palgo,
-        );
-        
-        match res {
-            Ok(_) => 0,
-            Err(e) => {
-                log::error!("Change password failed: {:?}", e);
-                -1
-            }
-        }
-    }));
-    
-    match result {
-        Ok(code) => code,
-        Err(_) => -1,
-    }
-}
-
-// Define a JNI function named Java_com_noxcipher_RustNative_formatVolume.
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
-    mut env: JNIEnv,
-    _class: JClass,
-    path: jni::objects::JString,
-    password: jbyteArray,
-    pim: jni::sys::jint,
-    volume_size: jlong,
-    volume_size: jlong,
-    salt: jbyteArray,
-    master_key: jbyteArray,
-    cipher_id: jni::sys::jint,
-    prf_id: jni::sys::jint,
-) -> jint {
-    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let path_str: String = env.get_string(&path)
-            .map(|s| s.into())
-            .unwrap_or_default();
-            
-        let pwd_obj = unsafe { JByteArray::from_raw(password) };
-        let mut pwd_bytes = Zeroizing::new(env.convert_byte_array(&pwd_obj).unwrap_or_default());
-        
-        let salt_obj = unsafe { JByteArray::from_raw(salt) };
-        let mut salt_bytes = Zeroizing::new(env.convert_byte_array(&salt_obj).unwrap_or_default());
-        
-        let mk_obj = unsafe { JByteArray::from_raw(master_key) };
-        let mut mk_bytes = Zeroizing::new(env.convert_byte_array(&mk_obj).unwrap_or_default());
-        
-        use volume::{PrfAlgorithm, CipherType};
-        let palgo = match prf_id {
-            1 => PrfAlgorithm::Sha512,
-            2 => PrfAlgorithm::Sha256,
-            3 => PrfAlgorithm::Whirlpool,
-            4 => PrfAlgorithm::Ripemd160,
-            5 => PrfAlgorithm::Streebog,
-            6 => PrfAlgorithm::Blake2s,
-            7 => PrfAlgorithm::Sha1,
-            _ => PrfAlgorithm::Sha512,
-        };
-
-        let cipher_type = match cipher_id {
-            1 => CipherType::Aes,
-            2 => CipherType::Serpent,
-            3 => CipherType::Twofish,
-            4 => CipherType::AesTwofish,
-            5 => CipherType::AesTwofishSerpent,
-            6 => CipherType::SerpentAes,
-            7 => CipherType::TwofishSerpent,
-            8 => CipherType::SerpentTwofishAes,
-            9 => CipherType::Camellia,
-            10 => CipherType::Kuznyechik,
-            11 => CipherType::CamelliaKuznyechik,
-            12 => CipherType::CamelliaSerpent,
-            13 => CipherType::KuznyechikAes,
-            14 => CipherType::KuznyechikSerpentCamellia,
-            15 => CipherType::KuznyechikTwofish,
-            _ => CipherType::Aes,
-        };
-
-        let res = volume::create_volume(
-             &path_str,
-             &pwd_bytes,
-             pim,
-             volume_size as u64,
-             &salt_bytes,
-             &mk_bytes,
-             cipher_type,
-             palgo,
-        );
-        
-        match res {
-            Ok(_) => 0,
-            Err(e) => {
-                log::error!("Format volume failed: {:?}", e);
-                -1
-            }
-        }
-    }));
-    
-    match result {
-        Ok(code) => code,
-        Err(_) => -1,
-    }
-}
 
 
 // Define a JNI function named Java_com_noxcipher_RustNative_cleanup.
@@ -1284,8 +1131,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
              None => return -4, // Invalid PRF
         };
         
-        // Call create_volume
-        match volume::create_volume(
+        // Call create_volume_file
+        match volume::create_volume_file(
             &path_str,
             &password_bytes,
             pim,
@@ -1293,7 +1140,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
             &salt_bytes,
             &master_key_bytes,
             cipher_type,
-            prf
+            prf,
+            None // default sector size
         ) {
             Ok(_) => 0, // Success
             Err(e) => {
@@ -1365,87 +1213,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
     }
 }
 
-// Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
-#[no_mangle]
-pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
-    mut env: JNIEnv,
-    _class: JClass,
-    path: jni::objects::JString,
-    old_password: jbyteArray,
-    old_pim: jni::sys::jint,
-    new_password: jbyteArray,
-    new_pim: jni::sys::jint,
-    new_salt: jbyteArray,
-    new_prf_id: jni::sys::jint,
-) -> jni::sys::jint {
-    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if path.is_null() || old_password.is_null() || new_password.is_null() || new_salt.is_null() {
-             let _ = env.throw_new("java/lang/IllegalArgumentException", "Arguments cannot be null");
-             return -1;
-        }
 
-        let path_str: String = match env.get_string(&path) {
-            Ok(s) => s.into(),
-            Err(e) => {
-                let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid path: {}", e));
-                return -1;
-            }
-        };
-
-        // Convert byte arrays
-        let old_pass_obj = unsafe { JByteArray::from_raw(old_password) };
-        let new_pass_obj = unsafe { JByteArray::from_raw(new_password) };
-        let new_salt_obj = unsafe { JByteArray::from_raw(new_salt) };
-
-        let old_pass_bytes = match env.convert_byte_array(&old_pass_obj) {
-            Ok(b) => b,
-            Err(_) => return -1,
-        };
-        let new_pass_bytes = match env.convert_byte_array(&new_pass_obj) {
-             Ok(b) => b,
-             Err(_) => return -1,
-        };
-        let new_salt_bytes = match env.convert_byte_array(&new_salt_obj) {
-             Ok(b) => b,
-             Err(_) => return -1,
-        };
-
-        // Map PRF
-        let prf = match new_prf_id {
-            1 => Some(volume::PrfAlgorithm::Sha512),
-            2 => Some(volume::PrfAlgorithm::Sha256),
-            3 => Some(volume::PrfAlgorithm::Whirlpool),
-            4 => Some(volume::PrfAlgorithm::Ripemd160),
-            5 => Some(volume::PrfAlgorithm::Streebog),
-            6 => Some(volume::PrfAlgorithm::Blake2s),
-            7 => Some(volume::PrfAlgorithm::Sha1),
-            _ => None, // Let volume decide default or keep old? Logic in change_password handles None.
-        };
-
-        match volume::change_password(
-            &path_str,
-            &old_pass_bytes,
-            old_pim,
-            &new_pass_bytes,
-            new_pim,
-            &new_salt_bytes,
-            prf,
-        ) {
-            Ok(_) => 0,
-            Err(e) => {
-                log::error!("Change password failed: {}", e);
-                 // Optional: throw exception
-                 // let _ = env.throw_new("java/io/IOException", format!("Failed: {}", e));
-                -1
-            }
-        }
-    }));
-
-    match result {
-        Ok(val) => val,
-        Err(_) => {
-             let _ = env.throw_new("java/lang/RuntimeException", "Panic in changePassword");
-             -1
-        }
-    }
-}
+#[cfg(test)]
+#[path = "tests_change_password.rs"]
+mod tests_change_password;

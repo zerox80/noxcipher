@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests {
     use crate::header::{VolumeHeader, HeaderError};
-    use crate::volume::{self, VolumeError, Volume};
+    use crate::volume::{self, VolumeError, Volume, CipherType, PrfAlgorithm};
     use crate::crypto::SupportedCipher;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,7 +59,19 @@ mod tests {
         let pim = 0;
         let size = 1024 * 1024; // 1MB
         
-        let res = volume::create_volume(path, password, pim, size);
+        let salt = [1u8; 64];
+        let master_key = [2u8; 64];
+        let res = volume::create_volume(
+            path, 
+            password, 
+            pim, 
+            size,
+            &salt,
+            &master_key,
+            CipherType::Aes,
+            PrfAlgorithm::Sha512,
+            None
+        );
         assert!(res.is_ok());
         
         // Cleanup
