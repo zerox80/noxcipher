@@ -1188,3 +1188,164 @@ pub extern "system" fn Java_com_noxcipher_RustNative_cleanup(
         }
     });
 }
+
+// Helper to map integer to CipherType
+fn int_to_cipher_type(val: i32) -> Option<volume::CipherType> {
+    match val {
+        0 => Some(volume::CipherType::Aes),
+        1 => Some(volume::CipherType::Serpent),
+        2 => Some(volume::CipherType::Twofish),
+        3 => Some(volume::CipherType::AesTwofish),
+        4 => Some(volume::CipherType::AesTwofishSerpent),
+        5 => Some(volume::CipherType::SerpentAes),
+        6 => Some(volume::CipherType::TwofishSerpent),
+        7 => Some(volume::CipherType::SerpentTwofishAes),
+        8 => Some(volume::CipherType::Camellia),
+        9 => Some(volume::CipherType::Kuznyechik),
+        10 => Some(volume::CipherType::CamelliaKuznyechik),
+        11 => Some(volume::CipherType::CamelliaSerpent),
+        12 => Some(volume::CipherType::KuznyechikAes),
+        13 => Some(volume::CipherType::KuznyechikSerpentCamellia),
+        14 => Some(volume::CipherType::KuznyechikTwofish),
+        _ => None,
+    }
+}
+
+// Helper to map integer to PrfAlgorithm
+fn int_to_prf(val: i32) -> Option<volume::PrfAlgorithm> {
+    match val {
+        0 => Some(volume::PrfAlgorithm::Sha512),
+        1 => Some(volume::PrfAlgorithm::Sha256),
+        2 => Some(volume::PrfAlgorithm::Whirlpool),
+        3 => Some(volume::PrfAlgorithm::Ripemd160),
+        4 => Some(volume::PrfAlgorithm::Streebog),
+        5 => Some(volume::PrfAlgorithm::Blake2s),
+        6 => Some(volume::PrfAlgorithm::Sha1),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: jni::objects::JString,
+    password: jbyteArray,
+    pim: jni::sys::jint,
+    size: jlong,
+    salt: jbyteArray,
+    master_key: jbyteArray,
+    cipher_type_int: jni::sys::jint,
+    prf_int: jni::sys::jint,
+) -> jni::sys::jint {
+    let res = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Convert path
+        let path_str: String = match env.get_string(&path) {
+             Ok(s) => s.into(),
+             Err(_) => return -1,
+        };
+        
+        // Convert byte arrays
+        let password_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(password) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+        let salt_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(salt) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+        let master_key_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(master_key) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+        
+        let cipher_type = match int_to_cipher_type(cipher_type_int) {
+             Some(c) => c,
+             None => return -3, // Invalid cipher
+        };
+        
+        let prf = match int_to_prf(prf_int) {
+             Some(p) => p,
+             None => return -4, // Invalid PRF
+        };
+        
+        // Call create_volume
+        match volume::create_volume(
+            &path_str,
+            &password_bytes,
+            pim,
+            size as u64,
+            &salt_bytes,
+            &master_key_bytes,
+            cipher_type,
+            prf
+        ) {
+            Ok(_) => 0, // Success
+            Err(e) => {
+                 log::error!("Format failed: {}", e);
+                 -5 // Error
+            }
+        }
+    }));
+    
+    match res {
+         Ok(val) => val,
+         Err(_) => -99 // Panic
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: jni::objects::JString,
+    old_password: jbyteArray,
+    old_pim: jni::sys::jint,
+    new_password: jbyteArray,
+    new_pim: jni::sys::jint,
+    new_salt: jbyteArray,
+    new_prf_int: jni::sys::jint,
+) -> jni::sys::jint {
+    let res = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path_str: String = match env.get_string(&path) {
+             Ok(s) => s.into(),
+             Err(_) => return -1,
+        };
+        
+        let old_pass_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(old_password) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+        let new_pass_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(new_password) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+         let new_salt_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(new_salt) }) {
+             Ok(b) => b,
+             Err(_) => return -2,
+        };
+        
+        let new_prf = int_to_prf(new_prf_int); // Option
+        
+        match volume::change_password(
+             &path_str,
+             &old_pass_bytes,
+             old_pim,
+             &new_pass_bytes,
+             new_pim,
+             &new_salt_bytes,
+             new_prf
+        ) {
+             Ok(_) => 0,
+             Err(e) => {
+                  log::error!("Change Password failed: {}", e);
+                  -5
+             }
+        }
+    }));
+    
+    match res {
+        Ok(val) => val,
+        Err(_) => -99
+    }
+}

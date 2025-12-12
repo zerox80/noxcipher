@@ -171,8 +171,8 @@ object RustNative {
         pim: Int,
         volumeSize: Long,
         salt: ByteArray,
-        salt: ByteArray,
         masterKey: ByteArray,
+        cipherTypeId: Int,
         prfId: Int
     ): Int
 

@@ -766,10 +766,10 @@ pub fn create_volume(
          return Err(VolumeError::CryptoError(format!("Master key too short for chosen cipher. Need {}", required_key_size)));
     }
 
-    let mut mk_arr = [0u8; 256];
+    let mut mk_arr = Zeroizing::new([0u8; 256]);
     mk_arr[..required_key_size].copy_from_slice(&master_key[..required_key_size]);
     
-    let mut salt_arr = [0u8; 64];
+    let mut salt_arr = Zeroizing::new([0u8; 64]);
     if salt.len() <= 64 { salt_arr[..salt.len()].copy_from_slice(salt); } else { salt_arr.copy_from_slice(&salt[..64]); }
 
     // Check for weak keys (simplified - checking all 32-byte chunks)
@@ -798,8 +798,8 @@ pub fn create_volume(
 
     let mut header = VolumeHeader::new(
         5, 0x011a, 
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or(std::time::Duration::ZERO).as_secs(), 
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or(std::time::Duration::ZERO).as_secs(), 
         0,
         encrypted_area_length, // Data size
         encrypted_area_start, // encrypted_area_start
@@ -847,10 +847,19 @@ pub fn create_volume(
     
     // Ensure everything is written
     writer.flush()?;
+    file.sync_all().map_err(|e| VolumeError::IoError(e))?;
     
     Ok(())
 }
 
+fn try_header_at_offset(
+    password: &[u8],
+    full_buffer: &[u8],
+    pim: i32,
+    offset: u64,
+    partition_start_offset: u64,
+    hidden_volume_offset: Option<u64>,
+) -> Result<Volume, VolumeError> {
         // Check if buffer has enough data for the header with overflow protection.
         let offset_usize = usize::try_from(offset)
             .map_err(|_| VolumeError::CryptoError("Offset too large for architecture".to_string()))?;
@@ -2533,200 +2542,4 @@ pub fn change_password(
     Ok(())
 }
 
-pub fn create_volume(
-    path: &str,
-    password: &[u8],
-    pim: i32,
-    size: u64,
-    salt: &[u8],
-    salt: &[u8],
-    master_key: &[u8],
-    prf: Option<PrfAlgorithm>,
-) -> Result<(), VolumeError> {
-    use std::fs::OpenOptions;
-    use std::io::{Write, Seek, SeekFrom};
-    use xts_mode::Xts128;
-    use aes::Aes256;
-    
-    // Check for minimum volume size.
-    if size < 262144 {
-        return Err(VolumeError::CryptoError("Volume size too small (min 256KB)".into()));
-    }
-    
-    if salt.len() != 64 {
-        return Err(VolumeError::CryptoError("Salt must be 64 bytes".into()));
-    }
-    // Max supported key size is 192 (for 256-bit 3-cascade i.e. 64*3). But passed master_key is usually just the key for encryption.
-    // XTS uses 2 keys. So for AES-256 (32 bytes key), we need 64 bytes.
-    // If master_key is 64 bytes -> AES, Serpent, Twofish, Camellia, etc. (XTS)
-    // If master_key is 128 bytes -> AES-Twofish (64+64)
-    // If master_key is 192 bytes -> AES-Twofish-Serpent (64+64+64)
-    
-    // Basic impl: Create file, write headers.
-    let mut file = OpenOptions::new().write(true).create(true).open(path)
-        .map_err(|e| VolumeError::IoError(e))?;
-        
-    let mut salt_arr = [0u8; 64];
-    salt_arr.copy_from_slice(salt);
 
-    let mut mk_vec = master_key.to_vec();
-    // Padding if needed? No, user should provide correct length.
-    
-    // Create Header struct
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs();
-    
-    // We need to fit master_key into [u8; 256].
-    let mut mk_fixed = [0u8; 256];
-    if master_key.len() > 256 {
-        return Err(VolumeError::CryptoError("Master key too long".into()));
-    }
-    mk_fixed[..master_key.len()].copy_from_slice(master_key);
-    
-    let header = VolumeHeader::new(
-        5, // Version
-        0x0100, // Min Program Version
-        now,
-        now,
-        0, // Hidden Vol Size
-        size - 262144, // Data Size (Size - 2*128KB headers?)
-        // Standard layout: Header (128KB area reserved? No, 512 bytes used but space is reserved usually)
-        // VeraCrypt reserves 128KB at start and end.
-        131072, // Encrypted Area Start
-        size - 262144, // Length
-        0, // Flags
-        512, // Sector Size
-        mk_fixed,
-        salt_arr,
-        pim,
-    );
-    
-    // Calculate CRC32s happens in serialize
-    
-    // Derive Header Key using PBKDF2.
-    let mut header_key = [0u8; 192]; 
-    let iters = if pim <= 0 { 
-        match prf {
-             Some(PrfAlgorithm::Sha512) | None => 500000,
-             Some(PrfAlgorithm::Whirlpool) => 500000, 
-             Some(PrfAlgorithm::Sha256) => 500000,
-             Some(PrfAlgorithm::Blake2s) => 500000, 
-             Some(PrfAlgorithm::Streebog) => 500000,
-             Some(PrfAlgorithm::Ripemd160) => 655331, // Standard default
-             Some(PrfAlgorithm::Sha1) => 1000, // Legacy default? Or 2000? VeraCrypt uses 1000/2000. Let's safe default 1000.
-        }
-    } else { 
-        match prf {
-            Some(PrfAlgorithm::Ripemd160) => {
-                 // Checked arithmetic for RIPEMD
-                 15000 + (pim as u32) * 1000 // Same formula? Yes.
-            },
-            Some(PrfAlgorithm::Sha256) | Some(PrfAlgorithm::Blake2s) | Some(PrfAlgorithm::Streebog) => {
-                 // Boot/System Encryption PIM usage?
-                 // If system encryption, it is pim * 2048.
-                 // But for standard volumes, it is 15000 + pim*1000.
-                 // Use standard formula for now unless we add a flag for "system" (boot) mode.
-                 // VeraCrypt docs say: "For system encryption... iterations = PIM x 2048".
-                 // We assume standard volume here.
-                 15000 + (pim as u32) * 1000
-            },
-            _ => 15000 + (pim as u32) * 1000
-        }
-    };
-
-    match prf.unwrap_or(PrfAlgorithm::Sha512) {
-        PrfAlgorithm::Sha512 => pbkdf2::<Hmac<Sha512>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Sha256 => pbkdf2::<Hmac<Sha256>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Whirlpool => pbkdf2::<Hmac<Whirlpool>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Ripemd160 => pbkdf2::<Hmac<Ripemd160>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Streebog => pbkdf2::<SimpleHmac<Streebog512>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Blake2s => pbkdf2::<SimpleHmac<Blake2s256>>(password, &salt_arr, iters, &mut header_key),
-        PrfAlgorithm::Sha1 => pbkdf2::<Hmac<Sha1>>(password, &salt_arr, iters, &mut header_key),
-    }
-    
-    // Check for weak keys (simplified for AES 64 usage)
-    if master_key.len() >= 64 {
-        let key = &header_key[0..64];
-        if key[0..32] == key[32..64] {
-             return Err(VolumeError::CryptoError("Generated weak XTS key for header".into()));
-        }
-    }
-    
-    let mut buffer = header.serialize().map_err(|e| VolumeError::InvalidHeader(e))?;
-    
-    // Encrypt Header. We infer algorithm from master_key length.
-    match master_key.len() {
-        64 => {
-            // Default to AES-256 XTS
-            let key = &header_key[0..64];
-            let c1 = AesWrapper::new((&key[0..32]).into());
-            let c2 = AesWrapper::new((&key[32..64]).into());
-            let xts = Xts128::<AesWrapper>::new(c1, c2);
-            let cipher = SupportedCipher::Aes(xts);
-            
-            let mut sector_buf = [0u8; 512];
-            sector_buf[0..64].copy_from_slice(&buffer[0..64]);
-            sector_buf[64..512].copy_from_slice(&buffer[64..512]);
-            cipher.encrypt_area(&mut sector_buf, 512, 0);
-            buffer[64..512].copy_from_slice(&sector_buf[64..512]);
-        },
-        128 => {
-            // Assume AES-Twofish
-            let key = &header_key[..128];
-             // 0..32 -> Twofish, 32..64 -> AES
-             let k_tf1 = &key[0..32];
-             let k_aes1 = &key[32..64];
-             let k_tf2 = &key[64..96];
-             let k_aes2 = &key[96..128];
-             let c_aes = Xts128::new(AesWrapper::new(k_aes1.into()), AesWrapper::new(k_aes2.into()));
-             let c_tf = Xts128::new(TwofishWrapper::new(k_tf1.into()), TwofishWrapper::new(k_tf2.into()));
-             let cipher = SupportedCipher::AesTwofish(c_aes, c_tf);
-             
-            let mut sector_buf = [0u8; 512];
-            sector_buf[0..64].copy_from_slice(&buffer[0..64]);
-            sector_buf[64..512].copy_from_slice(&buffer[64..512]);
-            cipher.encrypt_area(&mut sector_buf, 512, 0);
-            buffer[64..512].copy_from_slice(&sector_buf[64..512]);
-        },
-        192 => {
-            // Assume AES-Twofish-Serpent
-            let key = &header_key[..192];
-             let k_s1 = &key[0..32];
-             let k_t1 = &key[32..64];
-             let k_a1 = &key[64..96];
-             let k_s2 = &key[96..128];
-             let k_t2 = &key[128..160];
-             let k_a2 = &key[160..192];
-
-             let c_aes = Xts128::new(AesWrapper::new(k_a1.into()), AesWrapper::new(k_a2.into()));
-             let c_tf = Xts128::new(TwofishWrapper::new(k_t1.into()), TwofishWrapper::new(k_t2.into()));
-             let c_s = Xts128::new(SerpentWrapper::new(k_s1.into()), SerpentWrapper::new(k_s2.into()));
-             let cipher = SupportedCipher::AesTwofishSerpent(c_aes, c_tf, c_s);
-             
-            let mut sector_buf = [0u8; 512];
-            sector_buf[0..64].copy_from_slice(&buffer[0..64]);
-            sector_buf[64..512].copy_from_slice(&buffer[64..512]);
-            cipher.encrypt_area(&mut sector_buf, 512, 0);
-            buffer[64..512].copy_from_slice(&sector_buf[64..512]);
-        },
-        _ => {
-             return Err(VolumeError::CryptoError(format!("Unsupported master key length: {}", master_key.len())));
-        }
-    }
-    
-    // Write to file at offset 0
-    file.write_all(&buffer).map_err(|e| VolumeError::IoError(e))?;
-    
-    // Write to Backup Header
-    if size >= 131072 {
-         let backup_offset = size - 131072;
-         file.seek(SeekFrom::Start(backup_offset)).map_err(|e| VolumeError::IoError(e))?;
-         file.write_all(&buffer).map_err(|e| VolumeError::IoError(e))?;
-    }
-    
-    file.set_len(size).map_err(|e| VolumeError::IoError(e))?;
-    
-    // Sync all changes to disk to ensure integrity.
-    file.sync_all().map_err(|e| VolumeError::IoError(e))?;
-    
-    Ok(())
-}
