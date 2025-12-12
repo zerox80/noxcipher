@@ -88,6 +88,7 @@ impl fmt::Display for VolumeError {
 
 // Define the Volume struct representing a mounted volume.
 // Derive Zeroize and ZeroizeOnDrop to securely clear sensitive data.
+// Derive Zeroize and ZeroizeOnDrop to securely clear sensitive data.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Volume {
     // The parsed volume header.
@@ -107,6 +108,8 @@ pub struct Volume {
     protected_range_end: u64,
     // Flag indicating if the backup header was used.
     pub used_backup_header: bool,
+    // PIM associated (duplicated for easy access or just rely on header?)
+    // Let's rely on header.pim
 }
 
 // Implement Send trait for Volume to allow it to be sent across threads.
@@ -432,11 +435,7 @@ pub fn create_context(
 
     // 3. Try Backup Header at offset (Volume Size - 131072)
     // VeraCrypt stores a backup header at the end of the volume.
-    // Offset is: volume_size - 65536
-    // 3. Try Backup Header at offset (Volume Size - 131072)
-    // VeraCrypt stores a backup header at the end of the volume.
-    // Offset is: volume_size - 65536
-    // 3. Try Backup Header if provided or calculated
+    // Offset is: volume_size - 131072
     if protection_password.is_none() {
         if let Some(bh) = backup_header_bytes {
             // Backup Header provided by caller (preferred for large volumes where we don't map everything)
@@ -477,7 +476,7 @@ pub fn create_context(
             }
         } else if volume_size >= 131072 {
             // Fallback to legacy behavior if backup_header_bytes not provided but buffer might be large enough
-            let backup_offset = volume_size - 65536;
+            let backup_offset = volume_size - 131072;
             
             // Check overflow for + 512
             if backup_offset.checked_add(512).map_or(false, |end| (header_bytes.len() as u64) >= end) {
@@ -570,12 +569,27 @@ pub fn create_context(
 
     // Helper closure to try all supported ciphers with a derived key.
     let try_unlock = |key: &[u8]| -> Result<Volume, VolumeError> {
+        let hv_opt = hidden_volume_offset.or(if offset == 0 { None } else { Some(offset) });
+        // NOTE: hidden_volume_offset logic in original code was:
+        // if offset == 0 { None } else { Some(offset) }
+        // BUT offset is passed from caller. If caller passes non-zero offset (hidden volume?), we use it.
+        // Wait, the original code had: `partition_start_offset, hv_opt`.
+        // The `hidden_volume_offset` arg to `try_header_at_offset` is generic.
+        // If we are mounting a hidden volume, `offset` inside `try_header_at_offset` is the hidden volume offset?
+        // Let's preserve original logic: `let hv_opt = if offset == 0 { None } else { Some(offset) };`
+        // Wait, if `try_header_at_offset` is called with `offset` being the hidden volume offset, then yes.
+        // BUT `create_context` calls `try_header_at_offset` with 0, 65536, or backup.
+        // If we found a header at 65536, `offset` is 65536. Is this the hidden volume offset? Yes.
+        
         let hv_opt = if offset == 0 { None } else { Some(offset) };
+
         // Try AES
         if let Ok(v) = try_cipher::<Aes256>(
             key,
             encrypted_header,
             partition_start_offset, hv_opt,
+            salt,
+            pim,
             |k1, k2| {
                 SupportedCipher::Aes(Xts128::new(AesWrapper::new(k1.into()), AesWrapper::new(k2.into())))
             },
@@ -583,7 +597,7 @@ pub fn create_context(
             return Ok(v);
         }
         // Try Serpent
-        if let Ok(v) = try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt)
+        if let Ok(v) = try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, salt, pim)
         {
             return Ok(v);
         }
@@ -592,6 +606,8 @@ pub fn create_context(
             key,
             encrypted_header,
             partition_start_offset, hv_opt,
+            salt,
+            pim,
             |k1, k2| {
                 SupportedCipher::Twofish(Xts128::new(
                     TwofishWrapper::new(k1.into()),
@@ -601,58 +617,67 @@ pub fn create_context(
         ) {
             return Ok(v);
         }
-
+        // Try Camellia
+        if let Ok(v) = try_cipher::<Camellia256>(
+            key,
+            encrypted_header,
+            partition_start_offset, hv_opt,
+            salt,
+            pim,
+            |k1, k2| {
+                SupportedCipher::Camellia(Xts128::new(
+                    CamelliaWrapper::new(k1.into()),
+                    CamelliaWrapper::new(k2.into()),
+                ))
+            },
+        ) {
+            return Ok(v);
+        }
+        // Try Kuznyechik
+        if let Ok(v) = try_cipher::<Kuznyechik>(
+            key,
+            encrypted_header,
+            partition_start_offset, hv_opt,
+            salt,
+            pim,
+            |k1, k2| {
+                SupportedCipher::Kuznyechik(Xts128::new(
+                    KuznyechikWrapper::new(k1.into()),
+                    KuznyechikWrapper::new(k2.into()),
+                ))
+            },
+        ) {
+            return Ok(v);
+        }
+        
         // Cascades
-        // Try AES-Twofish
-        if let Ok(v) =
-            try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt)
-        {
+        if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt, salt, pim) {
             return Ok(v);
         }
-        // Try AES-Twofish-Serpent
-        if let Ok(v) =
-            try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt)
-        {
+        if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, salt, pim) {
             return Ok(v);
         }
-        // Try Serpent-AES
-        if let Ok(v) =
-            try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt)
-        {
+        if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt, salt, pim) {
             return Ok(v);
         }
-        // Try Twofish-Serpent
-        if let Ok(v) =
-            try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt)
-        {
+        if let Ok(v) = try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, salt, pim) {
             return Ok(v);
         }
         // Try Serpent-Twofish-AES
         if let Ok(v) =
-            try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt)
-        {
-            return Ok(v);
-        }
-        // Try Camellia
-        if let Ok(v) = try_cipher_camellia(key, encrypted_header, partition_start_offset, hv_opt)
-        {
-            return Ok(v);
-        }
-        // Try Kuznyechik
-        if let Ok(v) =
-            try_cipher_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt)
+            try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt, salt, pim)
         {
             return Ok(v);
         }
         // Try Camellia-Kuznyechik
         if let Ok(v) =
-            try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt)
+            try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt, salt, pim)
         {
             return Ok(v);
         }
         // Try Camellia-Serpent
         if let Ok(v) =
-            try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt)
+            try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt, salt, pim)
         {
             return Ok(v);
         }
@@ -915,6 +940,8 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
+    salt: &[u8],
+    pim: i32,
     create_cipher: impl Fn(&[u8], &[u8]) -> SupportedCipher,
 ) -> Result<Volume, VolumeError> {
     // Get the key size for the cipher.
@@ -954,7 +981,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0); // Sector size 512 for header? Yes.
 
     // Try to deserialize the decrypted header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         // Found it! Now derive the master keys for the volume data.
         // The master keys are in the decrypted header at offset 192.
         // We need to create the volume cipher using these keys.
@@ -990,7 +1017,8 @@ fn try_cipher_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_1 = &header_key[0..32];
@@ -1009,7 +1037,7 @@ fn try_cipher_serpent(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         // Create volume cipher with master keys.
         let mk = &header.master_key_data;
         let c1 = SerpentWrapper::new(mk[0..32].into());
@@ -1018,7 +1046,7 @@ fn try_cipher_serpent(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 32, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1038,7 +1066,8 @@ fn try_cipher_aes_twofish(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // VeraCrypt AESTwofish: Twofish then AES.
     // Key mapping: 0..32 -> Twofish, 32..64 -> AES.
@@ -1065,7 +1094,7 @@ fn try_cipher_aes_twofish(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Keys in master key area:
         // VeraCrypt AESTwofish: Key[0..32]->Twofish, Key[32..64]->AES.
@@ -1088,7 +1117,7 @@ fn try_cipher_aes_twofish(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1108,7 +1137,8 @@ fn try_cipher_aes_twofish_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1140,7 +1170,7 @@ fn try_cipher_aes_twofish_serpent(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1165,7 +1195,7 @@ fn try_cipher_aes_twofish_serpent(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 96, 32) || header.is_xts_key_vulnerable(32, 128, 32) || header.is_xts_key_vulnerable(64, 160, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1185,7 +1215,8 @@ fn try_cipher_serpent_aes(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_aes_1 = &header_key[0..32];
@@ -1209,7 +1240,7 @@ fn try_cipher_serpent_aes(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1223,11 +1254,12 @@ fn try_cipher_serpent_aes(
         let vol_serpent = Xts128::new(
             SerpentWrapper::new(mk_serpent_1.into()),
             SerpentWrapper::new(mk_serpent_2.into()),
+        );
         let vol_aes = Xts128::new(AesWrapper::new(mk_aes_1.into()), AesWrapper::new(mk_aes_2.into()));
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1247,7 +1279,8 @@ fn try_cipher_twofish_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1274,7 +1307,7 @@ fn try_cipher_twofish_serpent(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1296,7 +1329,7 @@ fn try_cipher_twofish_serpent(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1392,7 +1425,8 @@ fn try_cipher_camellia(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Use generic try_cipher with CamelliaWrapper.
     try_cipher::<CamelliaWrapper>(
@@ -1400,6 +1434,8 @@ fn try_cipher_camellia(
         encrypted_header,
         partition_start_offset,
         hidden_volume_offset,
+        salt,
+        pim,
         |k1, k2| {
             SupportedCipher::Camellia(Xts128::new(
                 CamelliaWrapper::new(k1.into()),
@@ -1414,7 +1450,8 @@ fn try_cipher_kuznyechik(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Use generic try_cipher with KuznyechikWrapper.
     try_cipher::<KuznyechikWrapper>(
@@ -1422,6 +1459,8 @@ fn try_cipher_kuznyechik(
         encrypted_header,
         partition_start_offset,
         hidden_volume_offset,
+        salt,
+        pim,
         |k1, k2| {
             SupportedCipher::Kuznyechik(Xts128::new(
                 KuznyechikWrapper::new(k1.into()),
@@ -1436,7 +1475,8 @@ fn try_cipher_camellia_kuznyechik(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_kuznyechik_1 = &header_key[0..32];
@@ -1463,7 +1503,7 @@ fn try_cipher_camellia_kuznyechik(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1485,7 +1525,7 @@ fn try_cipher_camellia_kuznyechik(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1505,7 +1545,8 @@ fn try_cipher_camellia_serpent(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_serpent_1 = &header_key[0..32];
@@ -1532,7 +1573,7 @@ fn try_cipher_camellia_serpent(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1554,7 +1595,7 @@ fn try_cipher_camellia_serpent(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1574,7 +1615,8 @@ fn try_cipher_kuznyechik_aes(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_aes_1 = &header_key[0..32];
@@ -1598,7 +1640,7 @@ fn try_cipher_kuznyechik_aes(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1617,7 +1659,7 @@ fn try_cipher_kuznyechik_aes(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1637,7 +1679,8 @@ fn try_cipher_kuznyechik_serpent_camellia(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_camellia_1 = &header_key[0..32];
@@ -1675,7 +1718,7 @@ fn try_cipher_kuznyechik_serpent_camellia(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1703,7 +1746,7 @@ fn try_cipher_kuznyechik_serpent_camellia(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 96, 32) || header.is_xts_key_vulnerable(32, 128, 32) || header.is_xts_key_vulnerable(64, 160, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1723,7 +1766,8 @@ fn try_cipher_kuznyechik_twofish(
     header_key: &[u8],
     encrypted_header: &[u8],
     partition_start_offset: u64, hidden_volume_offset: Option<u64>,
-    
+    salt: &[u8],
+    pim: i32,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
     let key_twofish_1 = &header_key[0..32];
@@ -1750,7 +1794,7 @@ fn try_cipher_kuznyechik_twofish(
     cipher_enum.decrypt_area(&mut decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted) {
+    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1772,7 +1816,7 @@ fn try_cipher_kuznyechik_twofish(
 
         // Check vulnerability.
         if header.is_xts_key_vulnerable(0, 64, 32) || header.is_xts_key_vulnerable(32, 96, 32) {
-            log::warn!("XTS Key Vulnerable");
+            return Err(VolumeError::CryptoError("XTS Key Vulnerable".into()));
         }
 
         // Return volume.
@@ -1808,7 +1852,7 @@ pub fn change_password(
     file.read_exact(&mut header_bytes).map_err(|e| VolumeError::IoError(e))?;
 
     // Try to decrypt the header with the old password.
-    let volume = try_header_at_offset(old_password, &header_bytes, old_pim, 0, 0, None)?;
+    let mut volume = try_header_at_offset(old_password, &header_bytes, old_pim, 0, 0, None)?;
     
     // Generate new salt (64 bytes).
     let mut new_salt = [0u8; 64];
@@ -1816,8 +1860,12 @@ pub fn change_password(
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut new_salt);
     
-    // Serialize the header with the new salt.
-    let serialized_header = volume.header.serialize(&new_salt)
+    // Update header with new salt and pim (in-memory).
+    volume.header.salt = new_salt;
+    volume.header.pim = new_pim;
+
+    // Serialize the header (it uses self.salt).
+    let serialized_header = volume.header.serialize()
         .map_err(|e| VolumeError::InvalidHeader(e))?; 
         
     // Derive new header key using PBKDF2-HMAC-SHA512 (default).
@@ -1899,10 +1947,14 @@ pub fn create_volume(
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut master_key);
     
+    // Generate Salt FIRST
+    let mut salt = [0u8; 64];
+    rng.fill_bytes(&mut salt);
+
     // Create Header struct
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     
-    let mut header = VolumeHeader::new(
+    let header = VolumeHeader::new(
         5, // Version
         0x0100, // Min Program Version
         now,
@@ -1916,13 +1968,11 @@ pub fn create_volume(
         0, // Flags
         512, // Sector Size
         master_key,
+        salt,
+        pim,
     );
     
     // Calculate CRC32s happens in serialize
-    
-    // Generate Salt
-    let mut salt = [0u8; 64];
-    rng.fill_bytes(&mut salt);
     
     // Serialize and Encrypt Header
     // Derive Header Key
@@ -1931,7 +1981,7 @@ pub fn create_volume(
     pbkdf2::<Hmac<Sha512>>(password, &salt, iters, &mut header_key);
     
     // Encrypt
-    let mut buffer = header.serialize(&salt).map_err(|e| VolumeError::InvalidHeader(e))?;
+    let mut buffer = header.serialize().map_err(|e| VolumeError::InvalidHeader(e))?;
     
     // Encrypt using AES-256 XTS (default for new volumes)
     let key = &header_key[0..64];

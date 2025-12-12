@@ -96,6 +96,11 @@ pub struct VolumeHeader {
     // The master key data, fixed at 256 bytes.
     // This contains the concatenated master keys for the volume.
     pub master_key_data: [u8; 256], // Max key area size
+    // The salt usually 64 bytes
+    pub salt: [u8; 64],
+    // PIM used to derive header key
+    #[zeroize(skip)]
+    pub pim: i32,
 }
 
 impl fmt::Debug for VolumeHeader {
@@ -113,7 +118,9 @@ impl fmt::Debug for VolumeHeader {
             .field("flags", &self.flags)
             .field("sector_size", &self.sector_size)
             .field("key_area_crc32", &self.key_area_crc32)
-            .field("master_key_data", &"<REDACTED>")
+            // .field("master_key_data", &"<REDACTED>")
+            .field("salt", &"<REDACTED>")
+            .field("pim", &self.pim)
             .finish()
     }
 }
@@ -122,12 +129,16 @@ impl fmt::Debug for VolumeHeader {
 impl VolumeHeader {
     // Function to deserialize a decrypted byte slice into a VolumeHeader struct.
     // Returns a Result containing the VolumeHeader or a HeaderError.
-    pub fn deserialize(decrypted: &[u8]) -> Result<Self, HeaderError> {
+    pub fn deserialize(decrypted: &[u8], salt: &[u8], pim: i32) -> Result<Self, HeaderError> {
         // Check if the decrypted data is large enough to contain a valid header.
         // A valid header must be at least 448 bytes (512 bytes total - 64 bytes salt).
         if decrypted.len() < 448 {
             // If the data is too short, return an error.
             return Err(HeaderError::DataTooShort(decrypted.len()));
+        }
+
+        if salt.len() != 64 {
+            return Err(HeaderError::DataTooShort(salt.len()));
         }
 
         // Extract the first 4 bytes to check the magic signature.
@@ -232,6 +243,9 @@ impl VolumeHeader {
         // Copy the key area data from the decrypted buffer (offset 192 to 448) into the array.
         master_key_data.copy_from_slice(&decrypted[192..448]);
 
+        let mut salt_arr = [0u8; 64];
+        salt_arr.copy_from_slice(salt);
+
         // Return the successfully constructed VolumeHeader struct wrapped in Ok.
         Ok(VolumeHeader {
             version,
@@ -247,6 +261,8 @@ impl VolumeHeader {
             sector_size,
             key_area_crc32,
             master_key_data,
+            salt: salt_arr,
+            pim,
         })
     }
 
@@ -281,6 +297,8 @@ impl VolumeHeader {
         flags: u32,
         sector_size: u32,
         master_key_data: [u8; 256],
+        salt: [u8; 64],
+        pim: i32,
     ) -> Self {
         VolumeHeader {
             version,
@@ -296,19 +314,18 @@ impl VolumeHeader {
             sector_size,
             key_area_crc32: 0, // Will be calculated on serialize
             master_key_data,
+            salt,
+            pim,
         }
     }
 
     // Function to serialize the VolumeHeader into a byte buffer.
-    pub fn serialize(&self, salt: &[u8]) -> Result<Zeroizing<Vec<u8>>, HeaderError> {
+    pub fn serialize(&self) -> Result<Zeroizing<Vec<u8>>, HeaderError> {
         // Create a 512-byte buffer initialized with zeros.
         let mut buffer = Zeroizing::new(vec![0u8; 512]);
         
         // Copy the salt (64 bytes) to the beginning.
-        if salt.len() != 64 {
-             return Err(HeaderError::DataTooShort(64));
-        }
-        buffer[0..64].copy_from_slice(salt);
+        buffer[0..64].copy_from_slice(&self.salt);
 
         // Calculate offset for encrypted area (start at 64).
         let header_start = 64;
@@ -388,10 +405,12 @@ mod tests {
     fn test_header_validation_overflow() {
         // Mock data too short (just zeros)
         let data = vec![0u8; 512];
+        let salt = vec![0u8; 64];
+        let pim = 0;
         // But headers must be valid magic.
         // We can't easily mock deserialize without a full encrypted packet or modifying the internal logic to accept partials.
         // But we can check if it fails safely.
-        let res = VolumeHeader::deserialize(&data);
+        let res = VolumeHeader::deserialize(&data, &salt, pim);
         assert!(res.is_err());
     }
 }
