@@ -82,8 +82,12 @@ impl DecryptedReader {
             return Ok(());
         }
 
-        // Calculate the byte offset of the sector.
-        let offset = sector_index * self.sector_size;
+        // Calculate the byte offset of the sector in the underlying encrypted volume.
+        // The decrypted filesystem starts at volume.data_offset().
+        let offset = sector_index
+            .checked_mul(self.sector_size)
+            .and_then(|o| o.checked_add(self.volume.data_offset()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Offset overflow"))?;
         
         // Seek to the sector offset in the underlying reader.
         // We only seek when we need to fill the window.

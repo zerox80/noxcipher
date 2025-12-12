@@ -116,6 +116,10 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     ): ParcelFileDescriptor {
         val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
         val file = getFileForDocId(fs, documentId)
+
+        if (mode != "r") {
+            throw FileNotFoundException("Read-only file system")
+        }
         
         // We need to return a ParcelFileDescriptor.
         // Since libaums doesn't give us a java.io.File or a real FD, we must use a Proxy.
@@ -133,8 +137,6 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
 
         // We need to implement a ProxyFileDescriptorCallback
         val callback = object : android.os.ProxyFileDescriptorCallback() {
-            private var currentOffset = 0L
-
             override fun onGetSize(): Long {
                 return file.length
             }
@@ -157,13 +159,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             }
 
             override fun onWrite(offset: Long, size: Int, data: ByteArray): Int {
-                val buffer = java.nio.ByteBuffer.wrap(data, 0, size)
-                try {
-                    file.write(offset, buffer)
-                    return size
-                } catch (e: IOException) {
-                    throw android.system.ErrnoException("write", android.system.OsConstants.EIO)
-                }
+                throw android.system.ErrnoException("write", android.system.OsConstants.EPERM)
             }
 
             override fun onRelease() {
@@ -229,12 +225,8 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
         
         // Flags
-        // Enable write flags
-        var flags = DocumentsContract.Document.FLAG_SUPPORTS_DELETE or DocumentsContract.Document.FLAG_SUPPORTS_WRITE
-        
-        if (file.isDirectory) {
-            flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
-        }
+        // Read-only provider
+        val flags = 0
         
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags)
         row.add(DocumentsContract.Document.COLUMN_SIZE, file.length)
@@ -258,29 +250,10 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     }
 
     override fun deleteDocument(documentId: String) {
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
-        try {
-            val file = getFileForDocId(fs, documentId)
-            file.delete()
-        } catch (e: IOException) {
-            throw FileNotFoundException(context!!.getString(R.string.error_delete, e.message))
-        }
+        throw FileNotFoundException("Read-only file system")
     }
 
     override fun createDocument(parentDocumentId: String, mimeType: String, displayName: String): String {
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
-        try {
-            val parentFile = getFileForDocId(fs, parentDocumentId)
-            if (!parentFile.isDirectory) throw FileNotFoundException(context!!.getString(R.string.error_parent_not_dir))
-            
-            val newFile = if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
-                parentFile.createDirectory(displayName)
-            } else {
-                parentFile.createFile(displayName)
-            }
-            return getDocIdForFile(newFile)
-        } catch (e: IOException) {
-            throw FileNotFoundException(context!!.getString(R.string.error_create, e.message))
-        }
+        throw FileNotFoundException("Read-only file system")
     }
 }

@@ -211,7 +211,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPermission(device: UsbDevice) {
-        val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE)
+        val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+        val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, flags)
         usbManager.requestPermission(device, permissionIntent)
     }
 

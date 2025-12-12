@@ -200,6 +200,10 @@ impl Volume {
         self.header.volume_data_size
     }
 
+    pub fn data_offset(&self) -> u64 {
+        self.header.encrypted_area_start
+    }
+
     // Method to decrypt a sector of data.
     #[allow(clippy::manual_is_multiple_of)]
     pub fn decrypt_sector(&self, sector_index: u64, data: &mut [u8]) -> Result<(), VolumeError> {
@@ -2543,5 +2547,4 @@ pub fn change_password(
     
     Ok(())
 }
-
 
