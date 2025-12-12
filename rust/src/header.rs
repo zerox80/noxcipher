@@ -99,7 +99,6 @@ pub struct VolumeHeader {
     // The salt usually 64 bytes
     pub salt: [u8; 64],
     // PIM used to derive header key
-    #[zeroize(skip)]
     pub pim: i32,
 }
 

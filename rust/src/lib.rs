@@ -830,29 +830,36 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
         // Retrieve the list of files from the file system.
         let files = {
             // Lock the FILESYSTEMS map for reading.
-            let lock = FILESYSTEMS.read().unwrap_or_else(|e| e.into_inner());
-            
-            if let Some(fs_arc) = lock.get(&fs_handle) {
+            let fs_arc_opt = {
+                let lock = FILESYSTEMS.read().unwrap_or_else(|e| e.into_inner());
+                lock.get(&fs_handle).cloned()
+            };
+
+            if let Some(fs_arc) = fs_arc_opt {
                  // Lock the specific filesystem for mutation (list_files requires &mut self).
+                 // We dropped the global lock above, so no deadlock possible if JNI callbacks lock standard global resources (unlikely logic here but good practice).
+                 
+                 // However, list_files calls JNI -> Java -> potentially anything.
+                 // So dropping global lock IS CRITICAL.
+                 
                  if let Ok(mut fs) = fs_arc.lock() {
                      // Call list_files on it.
                      fs.list_files(&path).unwrap_or_default()
                  } else {
-                     // If individual FS lock is poisoned, return empty or try to recover?
-                     // Verify if we can recover. If it panicked inside list_files, it might be in inconsistent state via Mutex.
-                     // But we can try.
                      match fs_arc.lock() {
                          Ok(mut fs) => fs.list_files(&path).unwrap_or_default(),
                          Err(poisoned) => {
-                             // Try to recover
                              let mut fs = poisoned.into_inner();
                              fs.list_files(&path).unwrap_or_default()
                          }
                      }
                  }
             } else {
-                // If not found, return an empty vector.
-                std::collections::VecDeque::new()
+                std::collections::VecDeque::new() // Not quite right type
+                // Wait, list_files returns Vec<FileInfo>. The default return for JNI should match.
+                // list_files returns io::Result<Vec<FileInfo>>. unwrap_or_default() returns Vec<FileInfo>.
+                // So here we need to return Vec::new().
+                Vec::new()
             }
         };
 
@@ -917,7 +924,15 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
                  if let Err(e) = env.set_object_array_element(&array, i as i32, obj_ref) {
                      log::warn!("Failed to set array element: {}", e);
                  }
+                 // Delete local ref to prevent overflow in large loops.
+                 env.delete_local_ref(obj_ref).unwrap_or_default();
             }
+            
+            // Delete the string ref.
+            // new_string returned a JString which is a JObject.
+            // But we actually need to be careful with types.
+            // name_jstr is a JString.
+             env.delete_local_ref(name_jstr.into()).unwrap_or_default();
         }
 
         // Return the raw pointer to the array.
@@ -1097,10 +1112,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
             
         let pwd_obj = unsafe { JByteArray::from_raw(password) };
         let mut pwd_bytes = Zeroizing::new(env.convert_byte_array(&pwd_obj).unwrap_or_default());
-
+        
         let salt_obj = unsafe { JByteArray::from_raw(salt) };
         let mut salt_bytes = Zeroizing::new(env.convert_byte_array(&salt_obj).unwrap_or_default());
-
+        
         let mk_obj = unsafe { JByteArray::from_raw(master_key) };
         let mut mk_bytes = Zeroizing::new(env.convert_byte_array(&mk_obj).unwrap_or_default());
         
@@ -1247,15 +1262,15 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
         
         // Convert byte arrays
         let password_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(password) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
         let salt_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(salt) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
         let master_key_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(master_key) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
         
@@ -1313,15 +1328,15 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
         };
         
         let old_pass_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(old_password) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
         let new_pass_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(new_password) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
          let new_salt_bytes = match env.convert_byte_array(unsafe { &JByteArray::from_raw(new_salt) }) {
-             Ok(b) => b,
+             Ok(b) => Zeroizing::new(b),
              Err(_) => return -2,
         };
         

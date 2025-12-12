@@ -775,8 +775,10 @@ pub fn create_volume(
     // Check for weak keys (simplified - checking all 32-byte chunks)
     for i in (0..required_key_size).step_by(32) {
          if i + 32 <= required_key_size {
-             // Check if this chunk is all zeros (common weak key indicator for mock)
-             // Or check for XTS equality if applicable
+             // Check if this chunk is all zeros
+             if mk_arr[i..i+32].iter().all(|&x| x == 0) {
+                 return Err(VolumeError::CryptoError("Weak Key Generated (All Zeros)".to_string()));
+             }
          }
          // XTS check: if secondary key equals primary
          if i % 64 == 0 && i + 64 <= required_key_size {
