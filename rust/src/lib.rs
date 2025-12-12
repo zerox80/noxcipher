@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 mod volume;
 // Declare the crypto module, which likely contains cryptographic primitives and operations.
 mod crypto;
+mod format;
 // Declare the header module, which likely handles parsing and processing of volume headers.
 mod header;
 // Declare the io_callback module, which likely provides mechanisms for I/O callbacks.
@@ -703,21 +704,17 @@ pub extern "system" fn Java_com_noxcipher_RustNative_isBackupHeaderUsed(
 // Define a JNI function named Java_com_noxcipher_RustNative_mountFs.
 // It attempts to mount a file system (NTFS or exFAT) on the volume.
 #[no_mangle]
+#[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
-    // The JNI environment.
     env: JNIEnv,
-    // The Java class.
     _class: JClass,
-    // The volume handle.
     volume_handle: jlong,
-    // The callback object for I/O operations.
     callback_obj: jni::objects::JObject,
-    // The size of the volume.
     volume_size: jlong,
 ) -> jlong {
-    // Wrap execution in panic::catch_unwind.
-    panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // Wrap execution in panic::catch_unwind to handle panics gracefully.
+    let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Retrieve the volume context associated with the handle.
         let volume = {
             // Lock the global CONTEXTS map.
@@ -726,107 +723,87 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
                 match contexts.get(&volume_handle) {
                     // If found, clone the volume context.
                     Some(v) => v.clone(),
-                    // If not found, return -1.
-                    None => return -1,
+                    // If not found, return Err.
+                    None => return Err("Volume handle invalid or expired".to_string()),
                 }
             } else {
-                 return -1;
+                 return Err("Failed to lock context map".to_string());
             }
         };
 
-        // Get the JavaVM instance from the environment.
-        // Expect success.
-        let jvm = env.get_java_vm().expect("Failed to get JavaVM");
-        // Create a global reference for the callback object so it persists.
-        // Expect success.
-        let callback_global = env
-            .new_global_ref(callback_obj)
-            .map_err(|e| format!("Failed to create global ref: {}", e))
-            .expect("Global ref creation failed"); // We can expect here because we are in catch_unwind
+        // Get the JavaVM instance safely.
+        let jvm = match env.get_java_vm() {
+            Ok(v) => v,
+            Err(e) => return Err(format!("JNI Error (get_java_vm): {}", e)),
+        };
 
-        // Create a new CallbackReader with the JVM, callback object, and volume size.
+        // Create a global reference for the callback object so it persists.
+        let callback_global = match env.new_global_ref(callback_obj) {
+            Ok(g) => g,
+            Err(e) => return Err(format!("JNI Error (new_global_ref): {}", e)),
+        };
+
+        // Create a new CallbackReader
         let reader = CallbackReader::new(jvm, callback_global, volume_size as u64);
-        // Create a DecryptedReader that wraps the CallbackReader and the volume context.
-        // This reader handles on-the-fly decryption.
+        // Create a DecryptedReader
         let decrypted_reader = DecryptedReader::new(reader, volume);
 
         // Try mounting as NTFS.
-        // Clone the decrypted reader for the NTFS attempt.
-        let mut reader_clone = decrypted_reader.clone();
-        // Attempt to create a new Ntfs instance.
-        // Try mounting as NTFS.
         if let Ok(ntfs_instance) = Ntfs::new(decrypted_reader.clone()) {
-            // Wait, Ntfs::new takes `&mut T`.
-            // We want to OWN the reader in the stored Ntfs instance.
-            // But `Ntfs::new` takes `R` (reader) by value? No, `&mut R` usually for methods.
-            // Let's check `filesystem.rs` usage: `Ntfs::new(&mut *reader)`.
-            // Wait, does `Ntfs` TAKE ownership? `pub struct Ntfs<R> { ... }`.
-            // `Ntfs::new(reader: R)`.
-            // In `filesystem.rs` previously:
-            // `match self { SupportedFileSystem::Ntfs(reader) => { ... Ntfs::new(&mut *reader) ... } }`
-            // This suggests `Ntfs` constructor might take `R` or `&mut R`.
-            // If it takes `&mut R`, then `Ntfs` struct holds a reference? That would be impossible for `SupportedFileSystem` enum to hold.
-            // So `Ntfs` MUST take `R` by value to own it.
-            // `ntfs` crate `Ntfs::new` typically takes `R`.
-            // Why did `filesystem.rs` use `&mut *reader`?
-            // `reader` was `DecryptedReader`. `&mut *reader` is `&mut DecryptedReader`.
-            // If `Ntfs::new` takes `R`, and we pass `&mut DecryptedReader`, then `R` is inferred as `&mut DecryptedReader`.
-            // This works for temporary usage.
-            // BUT if we want to STORE `Ntfs<DecryptedReader>`, we must pass `DecryptedReader` by value.
+            let mut lock = match FILESYSTEMS.write() {
+                Ok(l) => l,
+                Err(e) => e.into_inner(),
+            };
             
-            // So:
-            // Or better:
+            let mut handle_lock = match NEXT_FS_HANDLE.lock() {
+                Ok(l) => l,
+                Err(e) => e.into_inner(),
+            };
             
-            // Lock the FILESYSTEMS map for writing.
-            // Using unwrap_or_else to handle poisoned mutex gracefully
-            let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
+            let handle = *handle_lock;
+            *handle_lock += 1;
             
-            // Lock the NEXT_FS_HANDLE counter.
-            if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
-                // Get the current handle value.
-                let handle = *handle_lock;
-                // Increment the handle counter.
-                *handle_lock += 1;
-                // Insert the NTFS reader into the map with the new handle wrapped in Arc<Mutex>.
-                lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(Box::new(ntfs_instance)))));
-                // Return the handle.
-                return handle;
-            }
-            return -1;
+            lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(Box::new(ntfs_instance)))));
+            return Ok(handle);
         }
 
         // Try mounting as exFAT.
-        // Clone the decrypted reader for the exFAT attempt.
-        let reader_clone2 = decrypted_reader.clone();
-        // Attempt to open as ExFat.
-        if let Ok(exfat) = ExFat::open(reader_clone2) {
-            // Log success.
-            log::info!("Mounted exFAT");
-                // Lock the FILESYSTEMS map for writing.
-            let mut lock = FILESYSTEMS.write().unwrap_or_else(|e| e.into_inner());
-             
-             // Lock the NEXT_FS_HANDLE counter.
-             if let Ok(mut handle_lock) = NEXT_FS_HANDLE.lock() {
-                 // Get the current handle value.
-                 let handle = *handle_lock;
-                 // Increment the handle counter.
-                 *handle_lock += 1;
-                 // Insert the exFAT instance into the map with the new handle wrapped in Arc<Mutex>.
-                 let items: Vec<_> = exfat.into_iter().collect();
-                 lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::ExFat(items))));
-                 // Return the handle.
-                 return handle;
-             }
-             return -1;
+        // We use the same reader clone (DecryptedReader is cheap to clone).
+        if let Ok(exfat_instance) = ExFat::new(decrypted_reader) {
+             let mut lock = match FILESYSTEMS.write() {
+                Ok(l) => l,
+                Err(e) => e.into_inner(),
+            };
+            let mut handle_lock = match NEXT_FS_HANDLE.lock() {
+                Ok(l) => l,
+                Err(e) => e.into_inner(),
+            };
+
+            let handle = *handle_lock;
+            *handle_lock += 1;
+            
+            // Store the ExFat instance directly (wrapped in Box) to allow on-demand iteration.
+            lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::ExFat(Box::new(exfat_instance)))));
+            return Ok(handle);
         }
 
-        // Log a warning if neither NTFS nor exFAT could be mounted.
-        log::warn!("Failed to detect NTFS or exFAT");
-        // Return -1 to indicate failure.
-        -1
-    }))
-    .unwrap_or(-1) // If a panic occurred, return -1.
+        Err("Unsupported file system or mount failed".to_string())
+    }));
+
+    match result {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(msg)) => {
+            log::error!("Mount failed: {}", msg);
+            // We do NOT throw exception here to avoid crashing the flow if the app expects -1
+            -1
+        }
+        Err(_) => {
+            log::error!("Panic in mountFs");
+            -1
+        }
+    }
 }
+
 
 // Define a JNI function named Java_com_noxcipher_RustNative_listFiles.
 // It lists files in a directory of the mounted file system.
@@ -976,53 +953,48 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
 ) -> jlong {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Convert the Java string path to a Rust String.
-        // If conversion fails, use an empty string.
-        let path: String = env
-            .get_string(&path_obj)
-            .map(|s| s.into())
-            .unwrap_or_default();
+        let path: String = match env.get_string(&path_obj) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
 
         // Access the file system.
-        if let Ok(mut lock) = FILESYSTEMS.read() {
-             // Look up the file system by handle.
-            if let Some(fs) = lock.get_mut(&fs_handle) {
-                // Convert the raw JByteArray buffer to a JByteArray object unsafely.
-                let buf_obj = unsafe { JByteArray::from_raw(buffer) };
-                // Get the length of the buffer.
-                let len = env.get_array_length(&buf_obj).unwrap_or(0);
-                // Allocate a Rust vector of zeros with the same length.
-                let mut buf = Zeroizing::new(vec![0u8; len as usize]);
+        if let Ok(lock) = FILESYSTEMS.read() {
+             // Look up the file system handle.
+            if let Some(fs_arc) = lock.get(&fs_handle) {
+                // Lock the individual filesystem instance
+                if let Ok(mut fs) = fs_arc.lock() {
+                     // Convert the raw JByteArray buffer to a JByteArray object unsafely.
+                    let buf_obj = unsafe { JByteArray::from_raw(buffer) };
+                    // Get the length of the buffer.
+                    let len = env.get_array_length(&buf_obj).unwrap_or(0);
+                    // Allocate a Rust vector of zeros with the same length.
+                    let mut buf = Zeroizing::new(vec![0u8; len as usize]);
 
-                // Read the file content into the buffer.
-                let res = match fs.read_file(&path, offset as u64, &mut buf) {
-                    // If successful, returns the number of bytes read.
-                    Ok(bytes_read) => {
-                        // Write the data back to the Java array.
-                        // Get a const pointer to the buffer and cast it to i8.
-                         let buf_ptr = buf.as_ptr() as *const i8;
-                        // Create a slice from the raw parts with the number of bytes read.
-                        let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
-                        // Set the Java byte array region.
-                        if let Err(e) = env.set_byte_array_region(&buf_obj, 0, buf_slice) {
-                             log::error!("Failed to set byte array region: {}", e);
-                             -1
-                        } else {
-                            bytes_read as jlong
+                    // Read the file content into the buffer.
+                    let res = match fs.read_file(&path, offset as u64, &mut buf) {
+                        // If successful, returns the number of bytes read.
+                        Ok(bytes_read) => {
+                            // Write the data back to the Java array.
+                            let buf_ptr = buf.as_ptr() as *const i8;
+                            // Create a slice from the raw parts with the number of bytes read.
+                            let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
+                            // Set the Java byte array region.
+                            if let Err(e) = env.set_byte_array_region(&buf_obj, 0, buf_slice) {
+                                 log::error!("Failed to set byte array region: {}", e);
+                                 -1
+                            } else {
+                                bytes_read as jlong
+                            }
                         }
-                    }
-                    // If reading fails, return -1.
-                    Err(_) => -1,
-                };
-                
-                // Zeroize buffer - handled by Zeroizing
-                
-                res
-            } else {
-                -1
+                        // If reading fails, return -1.
+                        Err(_) => -1,
+                    };
+                    return res;
+                }
             }
-        } else {
-            -1
         }
+        -1
     }));
 
     match result {
@@ -1037,6 +1009,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
 // Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+// Define a JNI function named Java_com_noxcipher_RustNative_changePassword.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
     mut env: JNIEnv,
     _class: JClass,
@@ -1045,6 +1020,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
     old_pim: jni::sys::jint,
     new_password: jbyteArray,
     new_pim: jni::sys::jint,
+    new_salt: jbyteArray,
+    new_prf_id: jni::sys::jint,
 ) -> jint {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path_str: String = env.get_string(&path)
@@ -1057,15 +1034,30 @@ pub extern "system" fn Java_com_noxcipher_RustNative_changePassword(
         let new_pwd_obj = unsafe { JByteArray::from_raw(new_password) };
         let mut new_pwd_bytes = Zeroizing::new(env.convert_byte_array(&new_pwd_obj).unwrap_or_default());
         
+        let salt_obj = unsafe { JByteArray::from_raw(new_salt) };
+        let mut salt_bytes = Zeroizing::new(env.convert_byte_array(&salt_obj).unwrap_or_default());
+
+        use volume::PrfAlgorithm;
+        let palgo = match new_prf_id {
+            1 => Some(PrfAlgorithm::Sha512),
+            2 => Some(PrfAlgorithm::Sha256),
+            3 => Some(PrfAlgorithm::Whirlpool),
+            4 => Some(PrfAlgorithm::Ripemd160),
+            5 => Some(PrfAlgorithm::Streebog),
+            6 => Some(PrfAlgorithm::Blake2s),
+            7 => Some(PrfAlgorithm::Sha1),
+            _ => None, // -1 or 0 => Preserve/Unknown (Logic in volume.rs handles None as preserve)
+        };
+
         let res = volume::change_password(
              &path_str,
              &old_pwd_bytes,
              old_pim,
              &new_pwd_bytes,
-             new_pim
+             new_pim,
+             &salt_bytes,
+             palgo,
         );
-        
-        // zeroize handled by Drop
         
         match res {
             Ok(_) => 0,
@@ -1092,6 +1084,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
     password: jbyteArray,
     pim: jni::sys::jint,
     volume_size: jlong,
+    volume_size: jlong,
+    salt: jbyteArray,
+    master_key: jbyteArray,
+    cipher_id: jni::sys::jint,
+    prf_id: jni::sys::jint,
 ) -> jint {
     let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path_str: String = env.get_string(&path)
@@ -1100,15 +1097,54 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
             
         let pwd_obj = unsafe { JByteArray::from_raw(password) };
         let mut pwd_bytes = Zeroizing::new(env.convert_byte_array(&pwd_obj).unwrap_or_default());
+
+        let salt_obj = unsafe { JByteArray::from_raw(salt) };
+        let mut salt_bytes = Zeroizing::new(env.convert_byte_array(&salt_obj).unwrap_or_default());
+
+        let mk_obj = unsafe { JByteArray::from_raw(master_key) };
+        let mut mk_bytes = Zeroizing::new(env.convert_byte_array(&mk_obj).unwrap_or_default());
         
+        use volume::{PrfAlgorithm, CipherType};
+        let palgo = match prf_id {
+            1 => PrfAlgorithm::Sha512,
+            2 => PrfAlgorithm::Sha256,
+            3 => PrfAlgorithm::Whirlpool,
+            4 => PrfAlgorithm::Ripemd160,
+            5 => PrfAlgorithm::Streebog,
+            6 => PrfAlgorithm::Blake2s,
+            7 => PrfAlgorithm::Sha1,
+            _ => PrfAlgorithm::Sha512,
+        };
+
+        let cipher_type = match cipher_id {
+            1 => CipherType::Aes,
+            2 => CipherType::Serpent,
+            3 => CipherType::Twofish,
+            4 => CipherType::AesTwofish,
+            5 => CipherType::AesTwofishSerpent,
+            6 => CipherType::SerpentAes,
+            7 => CipherType::TwofishSerpent,
+            8 => CipherType::SerpentTwofishAes,
+            9 => CipherType::Camellia,
+            10 => CipherType::Kuznyechik,
+            11 => CipherType::CamelliaKuznyechik,
+            12 => CipherType::CamelliaSerpent,
+            13 => CipherType::KuznyechikAes,
+            14 => CipherType::KuznyechikSerpentCamellia,
+            15 => CipherType::KuznyechikTwofish,
+            _ => CipherType::Aes,
+        };
+
         let res = volume::create_volume(
              &path_str,
              &pwd_bytes,
              pim,
-             volume_size as u64
+             volume_size as u64,
+             &salt_bytes,
+             &mk_bytes,
+             cipher_type,
+             palgo,
         );
-        
-        // zeroize handled by Drop
         
         match res {
             Ok(_) => 0,
@@ -1125,3 +1161,30 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
     }
 }
 
+
+// Define a JNI function named Java_com_noxcipher_RustNative_cleanup.
+// It clears all volume contexts and filesystems, zeroing keys.
+#[no_mangle]
+pub extern "system" fn Java_com_noxcipher_RustNative_cleanup(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = panic::catch_unwind(|| {
+        log::info!("Executing cleanup");
+        
+        // Clear filesystems
+        if let Ok(mut lock) = FILESYSTEMS.write() {
+            lock.clear();
+        } else if let Ok(mut lock) = FILESYSTEMS.write() {
+             // Retry lock for poisoned? Handled by unwrap_or_else usually but here just try
+             // If heavily poisoned, we might leak, but this is best effort cleanup.
+             // Force clear if possible? 
+             *lock = std::collections::HashMap::new();
+        }
+        
+        // Clear volumes
+        if let Ok(mut lock) = volume::CONTEXTS.lock() {
+            lock.clear();
+        }
+    });
+}

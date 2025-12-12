@@ -15,6 +15,8 @@ use zeroize::Zeroize;
 
 // Struct representing a reader that decrypts data on the fly.
 // structure definition without Clone derive
+// Struct representing a reader that decrypts data on the fly.
+// structure definition without Clone derive
 pub struct DecryptedReader {
     // The underlying reader (CallbackReader) that provides raw encrypted data.
     inner: CallbackReader,
@@ -27,6 +29,8 @@ pub struct DecryptedReader {
     // Buffer to hold the decrypted data of the current sector.
     // Wrapped in Option for lazy allocation to save memory when listing many files.
     sector_buffer: Option<Vec<u8>>,
+    // Logical position of this reader (decoupled from inner reader).
+    position: u64,
 }
 
 impl Drop for DecryptedReader {
@@ -46,6 +50,8 @@ impl Clone for DecryptedReader {
             // Reset state in clone to avoid stale buffer/index and unnecessary allocation
             current_sector_index: u64::MAX,
             sector_buffer: None,
+            // Copy position state
+            position: self.position,
         }
     }
 }
@@ -65,6 +71,7 @@ impl DecryptedReader {
             current_sector_index: u64::MAX, // Invalid
             // Lazy allocation.
             sector_buffer: None,
+            position: 0,
         }
     }
 
@@ -78,14 +85,8 @@ impl DecryptedReader {
         // Calculate the byte offset of the sector.
         let offset = sector_index * self.sector_size;
         
-        // Seek to the sector offset in the underlying reader ONLY if needed.
-        // We track position manually to check, but since 'inner' is CallbackReader which tracks safely...
-        // Actually, we can just seek. CallbackReader seek is cheap (arithmetic).
-        // Optimization: avoid JNI overhead if position is already correct?
-        // But CallbackReader `seek` implementation is pure Rust arithmetic update of a u64 field.
-        // It DOES NOT call JNI. So `self.inner.seek` is very cheap.
-        // The issue reported was "inner reader... for every call".
-        // If `inner.seek` is cheap, then the optimization is less critical, but good practice.
+        // Seek to the sector offset in the underlying reader.
+        // We only seek when we need to fill the window.
         self.inner.seek(SeekFrom::Start(offset))?;
 
         // Read encrypted data into the buffer.
@@ -108,19 +109,12 @@ impl DecryptedReader {
         }
         
         // If we read partial sector, pad the rest with zeros (already zero initialized? No, we reuse buffer).
-        // Wait, current implementation allocates buffer once in struct?
-        // Ah, `self.sector_buffer` is reused. We MUST zero out the rest if partial read.
         if read_len < buffer.len() {
              // For security/determinism, zero out the rest.
              for i in read_len..buffer.len() {
                  buffer[i] = 0;
              }
         }
-        // If read_len is 0 and we are truly at EOF, decrypting a zero block might be valid or not, 
-        // but read_sector is usually called when we expect data. 
-        // If we are at EOF of volume, the caller (Read impl) handles offsets. 
-        // This helper reads PHYSICAL sector.
-        // If file is truncated, we treat as zero-padded.
 
         // Decrypt the data in-place using the volume's decrypt_sector method.
         self.volume
@@ -140,18 +134,18 @@ impl Read for DecryptedReader {
             return Ok(0);
         }
 
-        // Get the current position in the stream.
-        // Optimization: Avoid `stream_position` which calls `seek(Current(0))`.
-        // We know we are `CallbackReader`, whose seek is cheap.
-        // But let's rely on `self.inner.stream_position()` being efficient enough or use correct seek logic.
-        let current_pos = self.inner.stream_position()?;
+        // Use internal position
+        let current_pos = self.position;
+
+        if current_pos >= self.volume.size() {
+            return Ok(0);
+        }
         
         // Calculate sector index.
         let sector_index = current_pos / self.sector_size;
         let offset_in_sector = (current_pos % self.sector_size) as usize;
 
         // Ensure the correct sector is loaded and decrypted.
-        // Note: This seeks `inner` to sector start.
         self.read_sector(sector_index)?;
 
         // Calculate available bytes in this sector.
@@ -162,12 +156,11 @@ impl Read for DecryptedReader {
         let buffer = self.sector_buffer.as_ref().unwrap();
         buf[..to_read].copy_from_slice(&buffer[offset_in_sector..offset_in_sector + to_read]);
 
-        // Advance inner position properly.
-        // read_sector left inner at (sector_start + sector_size).
-        // We want it to be at (current_pos + to_read).
-        // So we MUST seek back.
-        // current_pos + to_read might be < sector_end.
-        self.inner.seek(SeekFrom::Start(current_pos + to_read as u64))?;
+        // Advance internal position.
+        self.position += to_read as u64;
+
+        // Note: inner reader position is left undefined (at end of sector read usually).
+        // We do NOT seek it back. This saves valueable arithmetic/JNI logic if any.
 
         Ok(to_read)
     }
@@ -176,16 +169,36 @@ impl Read for DecryptedReader {
 // Implement Seek trait for DecryptedReader.
 impl Seek for DecryptedReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::End(p) => {
+                 let size = self.volume.size();
+                 // helper for sealed arithmetic
+                 if p >= 0 {
+                     size.checked_add(p as u64).ok_or(io::Error::new(io::ErrorKind::Other, "Overflow"))?
+                 } else {
+                     size.checked_sub(p.unsigned_abs()).ok_or(io::Error::new(io::ErrorKind::Other, "Underflow"))?
+                 }
+            }
+            SeekFrom::Current(p) => {
+                if p >= 0 {
+                    self.position.checked_add(p as u64).ok_or(io::Error::new(io::ErrorKind::Other, "Overflow"))?
+                } else {
+                    self.position.checked_sub(p.unsigned_abs()).ok_or(io::Error::new(io::ErrorKind::Other, "Underflow"))?
+                }
+            }
+        };
+        self.position = new_pos;
+        Ok(new_pos)
     }
 }
 
 // Enum representing supported file systems.
 pub enum SupportedFileSystem {
     // NTFS file system wrapper.
-    Ntfs(Box<Ntfs<DecryptedReader>>), // Cached NTFS instance (boxed to avoid large size on stack/enum)
+    Ntfs(Box<Ntfs<DecryptedReader>>), 
     // ExFAT file system wrapper.
-    ExFat(Vec<exfat::directory::Item<DecryptedReader>>),
+    ExFat(Box<exfat::ExFat<DecryptedReader>>),
 }
 
 // Struct to hold information about a file or directory.
@@ -222,9 +235,7 @@ impl SupportedFileSystem {
         match self {
             // Handle NTFS file system.
             SupportedFileSystem::Ntfs(ntfs) => {
-                // Get the underlying reader (mutable borrow from Ntfs struct? No, Ntfs owns it.)
-                // Ntfs struct allows access to its inner reader via `get_mut()`.
-                // Accessing root directory requires mutable access to reader.
+                // Get the underlying reader
                 let reader = ntfs.get_mut();
                 reader.seek(SeekFrom::Start(0))?;
 
@@ -240,7 +251,7 @@ impl SupportedFileSystem {
                         .directory_index(reader)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     let mut found = false;
-                    // Iterate through entries in the directory.
+                    // Iterate through entries in the directory (NTFS uses B-Tree like structure)
                     let mut entries = index.entries();
                     while let Some(entry) = entries.next(&mut *reader) {
                         let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
@@ -263,15 +274,19 @@ impl SupportedFileSystem {
                     }
                 }
 
-                // We are now at the target directory. Get its index.
+                // We are now at the target directory. Get its index/entries.
                 let index = current_dir
                     .directory_index(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let mut results = Vec::new();
                 // Iterate through entries to collect file info.
                 let mut entries = index.entries();
+                
+                // For NTFS we iterate. Should validly limit for pagination if needed, but for now standard iteration.
+                // NOTE: NTFS entries iterator might be efficient, but large directories can still be slow.
+                // However, unlike ExFat code previously, this iterates one by one.
                 while let Some(entry_res) = entries.next(reader) {
-                    // Handle individual entry errors without failing the whole listing
+                    // Handle individual entry errors
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = match entry_res {
                         Ok(e) => e,
                         Err(e) => {
@@ -289,130 +304,191 @@ impl SupportedFileSystem {
                     };
                     
                     if let Some(key) = key {
-                        // Get the name of the entry.
+                        // Get the name.
                         let name = key.name().to_string_lossy();
-                        // Skip current and parent directory entries.
                         if name == "." || name == ".." {
                             continue;
                         }
     
-                        // Determine if it's a directory.
-                        let is_dir = key.is_directory();
-                        // Get the size of the entry.
-                        let size = key.data_size();
-                        // Add to results.
                         results.push(FileInfo {
                             name: name.to_string(),
-                            is_dir,
-                            size,
+                            is_dir: key.is_directory(),
+                            size: key.data_size(),
                         });
                     }
                 }
-                // Return the list of files.
                 Ok(results)
             }
             // Handle ExFAT file system.
-            SupportedFileSystem::ExFat(root_items) => {
-                let mut loaded_dir: Vec<exfat::directory::Item<DecryptedReader>> = Vec::new();
-                let mut is_root = true;
+            SupportedFileSystem::ExFat(exfat) => {
+                // EXFAT TRAVERSAL
+                // We start with root directory iterator
+                // Currently exfat crate `root_directory()` returns an Iterator of items.
+                // We cannot "seek" inside iterator unless we consume it.
+                // To traverse, we find the Directory item and open it.
+                
+                // Note: exfat crate usage pattern:
+                // `exfat.root_directory()` -> impl Iterator<Item=Item<R>>
+                // Item can be File/Directory.
+                // Directory has `open()` which returns a new Iterator (directory content).
+                
+                // We need to store the current iterator? No, we just need to drill down.
+                // But `root_directory()` takes `&self` (ref to ExFat struct).
+                // It returns an iterator that borrows from ExFat instance?
+                // Or works with the reader?
+                
+                // Strategy:
+                // 1. Get root directory iterator.
+                // 2. Iterate to find component.
+                // 3. If found (Dir), open it -> get new iterator.
+                // 4. Repeat.
+                
+                // Since `exfat` crate iterators are lazy, this handles the OOM issue (we don't collect until the end).
+                
+                // Problem: We need to traverse efficiently.
+                // Since this is listing files, we drill down to `path` then collect `path` children.
+                
+                // Root iterator
+                // We use a recursive approach or loop?
+                // `exfat.root_directory()` gives root items.
+                
+                // We need to hold the "Current Directory Iterator" logic.
+                // Since `exfat::directory::Directory` properties `open()` returns `Result<impl Iterator>`.
+                // We can't type-erase `impl Iterator` easily without Box<dyn Iterator>.
+                
+                // Let's iterate manually.
+                
+                // Need to find the target directory first.
+                // For root (empty components), we just list root.
+                
+                if components.is_empty() {
+                    let mut results = Vec::new();
+                    let root_iter = exfat.root_directory()
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                    
+                    for item in root_iter {
+                        match item {
+                             exfat::directory::Item::Directory(d) => results.push(FileInfo { 
+                                 name: d.name().to_string(), 
+                                 is_dir: true, 
+                                 size: 0 
+                             }),
+                             exfat::directory::Item::File(f) => results.push(FileInfo { 
+                                 name: f.name().to_string(), 
+                                 is_dir: false, 
+                                 size: f.len() 
+                             }),
+                        }
+                    }
+                    return Ok(results);
+                }
+                
+                // Drill down
+                // This is bit tricky because each level gives us an iterator we must consume to find the next dir.
+                // And `exfat` crate structures.
+                
+                // We need to implement a helper to "find directory in iterator".
+                
+                // Since we can't easily recurse with different iterator types (roots vs subdirs might differ in type signature in some crates, but usually `exfat` is consistent?),
+                // In `exfat` 0.1, `root_directory` returns `Result<Iter<'a, R>>`.
+                // `Directory::open` returns `Result<Iter<'a, R>>`.
+                // Usage: `let mut iter = exfat.root_directory()?;`
+                
+                // Let's implement the loop.
+                let mut current_iter = exfat.root_directory()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-                for component in components {
-                    let mut found_dir_items = None;
-
-                    if is_root {
-                        for item in root_items.iter() {
-                            if let exfat::directory::Item::Directory(dir) = item {
-                                if dir.name() == component {
-                                    found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::new(io::ErrorKind::Other, e.to_string())
-                                    })?);
-                                    break;
-                                }
+                // We need to process components one by one.
+                // But `open()` creates a NEW iterator.
+                // We can't assign `current_iter = new_iter` if they are derived from different lifecycles or ownerships?
+                // Actually they borrow `reader` from `exfat` struct usually.
+                
+                // For the loop to work, we need an intermediate `found_dir` object.
+                // `exfat::directory::Directory`.
+                
+                let mut target_dir_content: Option<Vec<FileInfo>> = None;
+                
+                // We have to restart logic for drill down.
+                // Since we can't easily keep the iterator "state" across components in a simple loop due to Rust type system (if `open` returns distinct type or lifetime issues),
+                // We will rely on recursion or just careful logic.
+                // Actually, `exfat` crate `Iter` type is likely `exfat::directory::Iter<'a, R>`.
+                
+                // Let's try to simulate checking each component.
+                
+                // Currently `exfat` 0.1 doesn't seem to support arbitrary path lookup, we have to iterate.
+                
+                // Recursive lookup helper?
+                fn find_dir<'a, R: io::Read + io::Seek>(
+                    mut iter: exfat::directory::Iter<'a, R>,
+                    components: &[&str],
+                ) -> io::Result<Vec<FileInfo>> {
+                    if components.is_empty() {
+                        // Current iter is the target. List it.
+                        let mut results = Vec::new();
+                         for item in iter {
+                            match item {
+                                 exfat::directory::Item::Directory(d) => results.push(FileInfo { 
+                                     name: d.name().to_string(), 
+                                     is_dir: true, 
+                                     size: 0 
+                                 }),
+                                 exfat::directory::Item::File(f) => results.push(FileInfo { 
+                                     name: f.name().to_string(), 
+                                     is_dir: false, 
+                                     size: f.len() 
+                                 }),
                             }
                         }
-                    } else {
-                        for item in loaded_dir.iter() {
-                            if let exfat::directory::Item::Directory(dir) = item {
-                                if dir.name() == component {
-                                    found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::new(io::ErrorKind::Other, e.to_string())
-                                    })?);
-                                    break;
-                                }
-                            }
-                        }
+                        return Ok(results);
                     }
-
-                    if let Some(items) = found_dir_items {
-                        loaded_dir = items;
-                        is_root = false;
-                    } else {
-                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
+                    
+                    let target_name = components[0];
+                    let remaining = &components[1..];
+                    
+                    for item in iter {
+                         if let exfat::directory::Item::Directory(d) = item {
+                             if d.name() == target_name {
+                                 let sub_iter = d.open().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                 return find_dir(sub_iter, remaining);
+                             }
+                         }
                     }
+                    Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
                 }
-
-                let mut results = Vec::new();
-                let items_to_list = if is_root {
-                    root_items.iter()
-                } else {
-                    loaded_dir.iter()
-                };
-
-                for item in items_to_list {
-                    match item {
-                        exfat::directory::Item::Directory(dir) => {
-                            results.push(FileInfo {
-                                name: dir.name().to_string(),
-                                is_dir: true,
-                                size: 0,
-                            });
-                        }
-                        exfat::directory::Item::File(file) => {
-                            results.push(FileInfo {
-                                name: file.name().to_string(),
-                                is_dir: false,
-                                size: file.len(),
-                            });
-                        }
-                    }
-                }
-                Ok(results)
+                
+                let root_iter = exfat.root_directory()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                
+                find_dir(root_iter, &components)
             }
         }
     }
 
     // Method to read data from a specific file.
     pub fn read_file(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        // Remove leading/trailing slashes.
         let path = path.trim_matches('/');
-        
-        // Security: Prevent path traversal.
+ 
         if path.contains("..") {
              return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Path traversal detected"));
         }
         
-        // Split path into components.
         let components: Vec<&str> = if path.is_empty() {
-            // Cannot read root as a file.
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty path"));
         } else {
             path.split('/').filter(|s| !s.is_empty()).collect()
         };
 
-        // Separate the file name from the directory path components.
         let (file_name, dir_components) = components.split_last().ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path components"))?;
 
         match self {
-            // Handle NTFS file system.
             SupportedFileSystem::Ntfs(ntfs) => {
                 let reader = ntfs.get_mut();
                 reader.seek(SeekFrom::Start(0))?;
                 
-                // Start at root.
                 let mut current_dir = ntfs
                     .root_directory(reader)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                // Traverse directories.
+
                 for component in dir_components {
                     let index = current_dir
                         .directory_index(reader)
@@ -447,14 +523,11 @@ impl SupportedFileSystem {
                     let entry: ntfs::NtfsIndexEntry<ntfs::indexes::NtfsFileNameIndex> = entry?;
                     let key = entry.key().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Key error: {}", e)))?;
                     if let Some(key) = key {
-                        // Check if entry name matches file name.
                         if key.name().to_string_lossy() == *file_name {
-                            // Convert entry to file.
                             let id = entry.file_reference().file_record_number();
                             let file = ntfs
                                 .file(reader, id)
                                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                            // Get data attribute (content).
                             let data = file.data(reader, "");
                             if let Some(attr_res) = data {
                                 let attr_item = attr_res
@@ -463,92 +536,66 @@ impl SupportedFileSystem {
                                 let mut value = attr
                                     .value(reader)
                                     .map_err(|e: ntfs::NtfsError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                                // Seek to the requested offset.
                                 value.seek(reader, SeekFrom::Start(offset)).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                                // Read data into buffer.
                                 return value.read(reader, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
                             }
                         }
                     }
                 }
-                // File not found.
                 Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
             }
             // Handle ExFAT file system.
-            SupportedFileSystem::ExFat(root_items) => {
-                let mut loaded_dir: Vec<exfat::directory::Item<DecryptedReader>> = Vec::new();
-                let mut is_root = true;
-
-                for component in dir_components {
-                    let mut found_dir_items = None;
-
-                    if is_root {
-                        for item in root_items.iter() {
-                            if let exfat::directory::Item::Directory(dir) = item {
-                                if dir.name() == *component {
-                                    found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::new(io::ErrorKind::Other, e.to_string())
-                                    })?);
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        for item in loaded_dir.iter() {
-                            if let exfat::directory::Item::Directory(dir) = item {
-                                if dir.name() == *component {
-                                    found_dir_items = Some(dir.open().map_err(|e| {
-                                        io::Error::new(io::ErrorKind::Other, e.to_string())
-                                    })?);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(items) = found_dir_items {
-                        loaded_dir = items;
-                        is_root = false;
-                    } else {
-                        return Err(io::Error::new(io::ErrorKind::NotFound, "Path not found"));
-                    }
-                }
-
-                if is_root {
-                    for item in root_items.iter_mut() {
-                        if let exfat::directory::Item::File(file) = item {
-                            if file.name() == *file_name {
-                                let reader_opt = file.open().map_err(|e| {
-                                    io::Error::new(io::ErrorKind::Other, e.to_string())
-                                })?;
-                                if let Some(mut reader) = reader_opt {
-                                    reader.seek(SeekFrom::Start(offset))?;
-                                    return reader.read(buf);
-                                } else {
-                                    return Ok(0);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    for item in loaded_dir.iter_mut() {
-                        if let exfat::directory::Item::File(file) = item {
-                            if file.name() == *file_name {
-                                let reader_opt = file.open().map_err(|e| {
-                                    io::Error::new(io::ErrorKind::Other, e.to_string())
-                                })?;
-                                if let Some(mut reader) = reader_opt {
-                                    reader.seek(SeekFrom::Start(offset))?;
-                                    return reader.read(buf);
-                                } else {
-                                    return Ok(0);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+            SupportedFileSystem::ExFat(exfat) => {
+                 // Helper to find file recursively
+                 // We can reuse logic or copy paste. Recursion is cleanest given iterators.
+                 
+                 fn find_read_file<'a, R: io::Read + io::Seek>(
+                    mut iter: exfat::directory::Iter<'a, R>,
+                    components: &[&str],
+                    offset: u64,
+                    buf: &mut [u8]
+                 ) -> io::Result<usize> {
+                     if components.is_empty() {
+                         // We expect a file name as last component
+                         return Err(io::Error::new(io::ErrorKind::NotFound, "File not specified"));
+                     }
+                     
+                     let target = components[0];
+                     let is_last = components.len() == 1;
+                     
+                     for item in iter {
+                         match item {
+                             exfat::directory::Item::Directory(d) => {
+                                 if !is_last && d.name() == target {
+                                     let sub_iter = d.open().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                     return find_read_file(sub_iter, &components[1..], offset, buf);
+                                 }
+                             },
+                             exfat::directory::Item::File(f) => {
+                                 if is_last && f.name() == target {
+                                     let reader_opt = f.open().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                                     if let Some(mut reader) = reader_opt {
+                                         reader.seek(SeekFrom::Start(offset))?;
+                                         return reader.read(buf);
+                                     } else {
+                                          return Ok(0);
+                                     }
+                                 }
+                             }
+                         }
+                     }
+                     Err(io::Error::new(io::ErrorKind::NotFound, "File or Path not found"))
+                 }
+                 
+                 let root_iter = exfat.root_directory()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                    
+                 // Reconstruct full path components (dirs + filename)
+                 let mut all_components = Vec::new();
+                 all_components.extend_from_slice(dir_components);
+                 all_components.push(*file_name);
+                 
+                 find_read_file(root_iter, &all_components, offset, buf)
             }
         }
     }

@@ -286,7 +286,16 @@ impl VolumeHeader {
         let key2 = &self.master_key_data[secondary_offset..secondary_offset + key_size];
 
         // Return true if Key1 is identical to Key2.
-        key1 == key2
+        // Return true if Key1 is identical to Key2.
+        // Use constant-time comparison to prevent timing attacks.
+        if key1.len() != key2.len() {
+            return false;
+        }
+        let mut diff = 0u8;
+        for (a, b) in key1.iter().zip(key2.iter()) {
+            diff |= a ^ b;
+        }
+        diff == 0
     }
 
     // Constructor for creating a new VolumeHeader.
@@ -307,6 +316,9 @@ impl VolumeHeader {
     ) -> Result<Self, String> {
         if sector_size < 512 || sector_size > 4096 || (sector_size & (sector_size - 1)) != 0 {
             return Err("Invalid sector size: must be power of 2 between 512 and 4096".to_string());
+        }
+        if version < 5 && sector_size != 512 {
+            return Err("Sector size must be 512 for volume version < 5".to_string());
         }
 
         Ok(Self {
@@ -329,7 +341,7 @@ impl VolumeHeader {
     }
 
     // Function to serialize the VolumeHeader into a byte buffer.
-    pub fn serialize(&self) -> Result<Zeroizing<Vec<u8>>, HeaderError> {
+    pub fn serialize(&mut self) -> Result<Zeroizing<Vec<u8>>, HeaderError> {
         // Create a 512-byte buffer initialized with zeros.
         let mut buffer = Zeroizing::new(vec![0u8; 512]);
         
@@ -385,6 +397,7 @@ impl VolumeHeader {
         
         // Calculate Key Area CRC32.
         let key_area_crc = crc32fast::hash(&buffer[header_start + 192..header_start + 448]);
+        self.key_area_crc32 = key_area_crc;
         
         // Write Key Area CRC32 at offset 8.
         BigEndian::write_u32(&mut buffer[header_start + 8..header_start + 12], key_area_crc);
@@ -392,6 +405,7 @@ impl VolumeHeader {
         // Calculate Header CRC32 (first 188 bytes of encrypted area).
         // 0 to 188 relative to header_start.
         let header_crc = crc32fast::hash(&buffer[header_start..header_start + 188]);
+        self.crc32 = header_crc;
         
         // Write Header CRC32 at offset 188.
         BigEndian::write_u32(&mut buffer[header_start + 188..header_start + 192], header_crc);
@@ -426,5 +440,34 @@ mod tests {
         // But we can check if it fails safely.
         let res = VolumeHeader::deserialize(&data, &salt, pim);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_serialize_updates_crcs() {
+        let master_key = [1u8; 256];
+        let salt = [2u8; 64];
+        let mut header = VolumeHeader::new(
+            5,
+            0x011a,
+            0,
+            0,
+            0,
+            1024 * 1024, // 1MB data
+            131072, // encrypted area start
+            1024 * 1024,
+            0,
+            512,
+            master_key,
+            salt,
+            0, // pim
+        ).unwrap();
+
+        assert_eq!(header.crc32, 0);
+        assert_eq!(header.key_area_crc32, 0);
+
+        let _ = header.serialize().unwrap();
+
+        assert_ne!(header.crc32, 0);
+        assert_ne!(header.key_area_crc32, 0);
     }
 }

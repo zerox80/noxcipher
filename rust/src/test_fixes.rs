@@ -12,34 +12,44 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut header = VolumeHeader::new(
             4, 0x0100, now, now, 0, 10000, 131072, 10000, 0, 512, [0u8; 256], [0u8; 64], 0
-        );
+        ).unwrap();
         assert_eq!(header.sector_size, 512);
 
         // Test Version 5 (Can be 4096)
         let header_v5 = VolumeHeader::new(
             5, 0x0100, now, now, 0, 10000, 131072, 10000, 0, 4096, [0u8; 256], [0u8; 64], 0
-        );
+        ).unwrap();
         assert_eq!(header_v5.sector_size, 4096);
     }
     
     #[test]
-    fn test_vulnerable_xts_key_detection() {
-        // Setup a header that reports vulnerable keys
-        // We can't easily mock is_xts_key_vulnerable return value without changing the struct logic or using a trait.
-        // But we can construct a key that MIGHT be vulnerable if we knew the check logic (usually duplicate halves).
-        // Let's assume the check detects if key1 == key2.
-        
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut header = VolumeHeader::new(
-            5, 0x0100, now, now, 0, 10000, 131072, 10000, 0, 512, [0u8; 256], [0u8; 64], 0
-        );
-        
-        // Mocking behavior: The actual test would require us to know how to trigger is_xts_key_vulnerable.
-        // The current implementation checks specific byte patterns or equality.
-        // Assuming we corrected the 'try_cipher' to return error on vulnerability.
-        // We'll trust the code review for now or add a more specific test if we can modify strict logic.
+    fn test_is_xts_key_vulnerable_logic() {
+         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+         let mut mk = [0u8; 256];
+         // Case 1: Keys are different
+         for i in 0..256 { mk[i] = i as u8; }
+         
+         let header = VolumeHeader::new(
+             5, 0x0100, now, now, 0, 10000, 131072, 10000, 0, 512, mk, [0u8; 64], 0
+         ).unwrap();
+         
+         // Not vulnerable
+         assert!(!header.is_xts_key_vulnerable(0, 32, 32));
+         
+         // Case 2: Keys are same
+         let mut mk_same = [0u8; 256];
+         // Set 0..32 to As
+         for i in 0..32 { mk_same[i] = 0xAA; }
+         // Set 32..64 to As
+         for i in 32..64 { mk_same[i] = 0xAA; }
+         
+         let header_same = VolumeHeader::new(
+             5, 0x0100, now, now, 0, 10000, 131072, 10000, 0, 512, mk_same, [0u8; 64], 0
+         ).unwrap();
+         
+         assert!(header_same.is_xts_key_vulnerable(0, 32, 32));
     }
-    
+
     #[test]
     fn test_create_volume_buffer_size() {
         // Just ensure it doesn't panic

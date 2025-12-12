@@ -187,11 +187,13 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         if (docId == DEFAULT_ROOT_ID) return fs.rootDirectory
         
         // Split path and traverse
-        // docId is like "/folder/file.txt"
+        // docId is like "root/folder/file.txt"
+        // We need to ignore the first component if it is DEFAULT_ROOT_ID
         val parts = docId.split("/").filter { it.isNotEmpty() }
         var current = fs.rootDirectory
         
         for (part in parts) {
+            if (part == DEFAULT_ROOT_ID) continue
             val children = current.listFiles()
             current = children.find { it.name == part } ?: throw FileNotFoundException(context!!.getString(R.string.error_file_not_found_in, part, docId))
         }
@@ -227,12 +229,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
         
         // Flags
-        // Disable write flags as write support is incomplete/buggy
-        val flags = 0 // DocumentsContract.Document.FLAG_SUPPORTS_WRITE | ...
+        // Enable write flags
+        var flags = DocumentsContract.Document.FLAG_SUPPORTS_DELETE or DocumentsContract.Document.FLAG_SUPPORTS_WRITE
         
-        // if (file.isDirectory) {
-        //     flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
-        // }
+        if (file.isDirectory) {
+            flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+        }
         
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags)
         row.add(DocumentsContract.Document.COLUMN_SIZE, file.length)

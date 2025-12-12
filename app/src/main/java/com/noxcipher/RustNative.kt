@@ -21,10 +21,24 @@ object RustNative {
             isInitialized = true
         } catch (e: UnsatisfiedLinkError) {
             Log.e("RustNative", "CRITICAL: Failed to load rust_noxcipher library. Ensure the .so file is present for this architecture.", e)
+            isInitialized = false
         } catch (e: Exception) {
             Log.e("RustNative", "CRITICAL: Unexpected error during native init", e)
+            isInitialized = false
         } catch (e: Throwable) {
              Log.e("RustNative", "CRITICAL: Fatal error during native init", e)
+             isInitialized = false
+        }
+    }
+
+    /**
+     * Best-effort memory wipe for sensitive ByteArrays.
+     * Note: This does not guarantee clearing copies made by GC or JIT.
+     */
+    fun clearByteArray(array: ByteArray?) {
+        if (array == null) return
+        for (i in array.indices) {
+            array[i] = 0
         }
     }
 
@@ -136,7 +150,9 @@ object RustNative {
         oldPassword: ByteArray,
         oldPim: Int,
         newPassword: ByteArray,
-        newPim: Int
+        newPim: Int,
+        newSalt: ByteArray,
+        newPrfId: Int
     ): Int
 
     /**
@@ -145,12 +161,24 @@ object RustNative {
      * @param password The password.
      * @param pim The PIM.
      * @param volumeSize The size of the volume in bytes.
+     * @param salt The 64 byte salt.
+     * @param masterKey The 256 byte master key.
      * @return 0 on success, -1 on failure.
      */
     external fun formatVolume(
         path: String,
         password: ByteArray,
         pim: Int,
-        volumeSize: Long
+        volumeSize: Long,
+        salt: ByteArray,
+        salt: ByteArray,
+        masterKey: ByteArray,
+        prfId: Int
     ): Int
+
+    /**
+     * Clears all volume contexts and sensitive keys from native memory.
+     * Should be called on app destroy or logout.
+     */
+    external fun cleanup()
 }
