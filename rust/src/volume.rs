@@ -678,9 +678,10 @@ impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
     fn flush_sector(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() { return Ok(()); }
         
-        // Pad to sector size if needed (though formatting should align)
-        let rem = self.buffer.len() % self.sector_size as usize;
         if rem != 0 {
+             // WARNING: Padding with zeros. This overrides existing data on disk if this is an update.
+             // Safe for formatting new volumes (create_volume), but dangerous for updates.
+             log::warn!("EncryptedVolumeWriter: Padding partial sector with zeros (Potential Data Loss if updating)");
              self.buffer.resize(self.buffer.len() + (self.sector_size as usize - rem), 0);
         }
         
@@ -745,6 +746,36 @@ impl<'a, W: Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
     }
 }
 
+// Helper to derive key (generic)
+fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], prf: PrfAlgorithm) {
+    let iter = if pim > 0 {
+         // Standard: 15000 + (pim * 1000)
+         // Note: RIPEMD-160 usually follows the same formula if PIM > 0
+         15000 + (pim as u32) * 1000
+    } else {
+        // Defaults
+        match prf {
+            PrfAlgorithm::Ripemd160 => 655331,
+            PrfAlgorithm::Sha1 => 2000, // Legacy
+            PrfAlgorithm::Sha256 => 500_000, // SHA-256 default
+            PrfAlgorithm::Sha512 => 500_000, 
+            PrfAlgorithm::Whirlpool => 500_000,
+            PrfAlgorithm::Streebog => 500_000,
+            PrfAlgorithm::Blake2s => 500_000,
+        }
+    };
+
+    match prf {
+        PrfAlgorithm::Sha512 => { pbkdf2::<Hmac<Sha512>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Sha256 => { pbkdf2::<Hmac<Sha256>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Whirlpool => { pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Ripemd160 => { pbkdf2::<Hmac<Ripemd160>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Streebog => { pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Blake2s => { pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Sha1 => { pbkdf2::<Hmac<Sha1>>(password, salt, iter, key).ok(); },
+    }
+}
+
 pub fn create_volume(
     path: &str,
     password: &[u8],
@@ -784,9 +815,15 @@ pub fn create_volume(
                  return Err(VolumeError::CryptoError("Weak Key Generated (All Zeros)".to_string()));
              }
          }
-         // XTS check: if secondary key equals primary
+         // XTS check: if secondary key equals primary (Constant Time)
          if i % 64 == 0 && i + 64 <= required_key_size {
-             if mk_arr[i..i+32] == mk_arr[i+32..i+64] {
+             let k1 = &mk_arr[i..i+32];
+             let k2 = &mk_arr[i+32..i+64];
+             let mut diff = 0u8;
+             for (b1, b2) in k1.iter().zip(k2.iter()) {
+                 diff |= b1 ^ b2;
+             }
+             if diff == 0 {
                   return Err(VolumeError::CryptoError("Weak XTS Key Generated".to_string()));
              }
          }

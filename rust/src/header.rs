@@ -17,7 +17,7 @@ pub enum HeaderError {
     // Error variant indicating that the magic bytes ("VERA" or "TRUE") were not found in the header.
     InvalidMagic,
     // Error variant indicating that the calculated CRC32 checksum does not match the stored checksum.
-    InvalidHeaderCrc { expected: u32, calculated: u32 },
+    InvalidHeaderCrc,
     // Error variant indicating that the header version is not supported by this implementation.
     UnsupportedVersion(u16),
     // Error variant indicating that the minimum program version required by the volume is higher than supported.
@@ -29,7 +29,7 @@ pub enum HeaderError {
     // Error variant indicating data too short
     DataTooShort(usize),
     // Error variant indicating Key Area CRC mismatch
-    InvalidKeyAreaCrc { expected: u32, calculated: u32 },
+    InvalidKeyAreaCrc,
     InvalidLayout,
 }
 
@@ -42,7 +42,7 @@ impl fmt::Display for HeaderError {
             // For InvalidMagic, write "Invalid Magic 'VERA'" to the formatter.
             HeaderError::InvalidMagic => write!(f, "Invalid Magic (Expected VERA or TRUE)"),
             // For InvalidCrc, write "Header CRC mismatch" to the formatter.
-            HeaderError::InvalidHeaderCrc { expected, calculated } => write!(f, "Header CRC mismatch: expected {:#010x}, calculated {:#010x}", expected, calculated),
+            HeaderError::InvalidHeaderCrc => write!(f, "Header CRC mismatch"),
             // For UnsupportedVersion, write "Unsupported Header Version" to the formatter.
             HeaderError::UnsupportedVersion(v) => write!(f, "Unsupported Header Version: {}", v),
             // For UnsupportedProgramVersion, write "Unsupported Min Program Version" to the formatter.
@@ -53,7 +53,7 @@ impl fmt::Display for HeaderError {
             HeaderError::InvalidKeySize => write!(f, "Invalid Key Size"),
             HeaderError::DataTooShort(l) => write!(f, "Header data too short: {} bytes", l),
             HeaderError::InvalidLayout => write!(f, "Invalid Header Layout (Overflow)"),
-            HeaderError::InvalidKeyAreaCrc { expected, calculated } => write!(f, "Key Area CRC mismatch: expected {:#010x}, calculated {:#010x}", expected, calculated),
+            HeaderError::InvalidKeyAreaCrc => write!(f, "Key Area CRC mismatch"),
         }
     }
 }
@@ -168,7 +168,7 @@ impl VolumeHeader {
             // Compare the stored CRC with the calculated CRC.
             if header_crc_stored != header_crc_calc {
                 // If they don't match, return an InvalidCrc error.
-                return Err(HeaderError::InvalidHeaderCrc { expected: header_crc_stored, calculated: header_crc_calc });
+                return Err(HeaderError::InvalidHeaderCrc);
             }
         }
 
@@ -239,7 +239,7 @@ impl VolumeHeader {
         if key_area_crc32 != key_area_crc_calc {
             // If they don't match, return an InvalidCrc error.
             // This indicates potential corruption of the master keys.
-            return Err(HeaderError::InvalidKeyAreaCrc { expected: key_area_crc32, calculated: key_area_crc_calc });
+            return Err(HeaderError::InvalidKeyAreaCrc);
         }
 
         // Initialize a 256-byte array for the master key data, filled with zeros.
