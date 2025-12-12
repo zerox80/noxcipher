@@ -77,4 +77,6 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(path);
     }
+
+    // test_encrypted_writer_partial_flush moved to volume.rs due to visibility
 }

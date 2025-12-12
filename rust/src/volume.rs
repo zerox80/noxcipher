@@ -536,6 +536,10 @@ pub fn create_context(
                      Ok(mut vol) => {
                          log::info!("Mounted Backup Header");
                          vol.used_backup_header = true;
+                         // Fix Bug 4: Update header_offset to absolute position
+                         if volume_size >= 131072 {
+                             vol.header_offset = volume_size - 131072;
+                         }
                          return register_context(vol);
                      }
                      Err(_) => attempt_errors.push("Backup Header: Failed".to_string()),
@@ -669,7 +673,9 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
 }
 
 // Encrypted Writer for Formatting
-struct EncryptedVolumeWriter<'a, W: Write + Seek> {
+// Encrypted Writer for Formatting
+// Encrypted Writer for Formatting
+struct EncryptedVolumeWriter<'a, W: Read + Write + Seek> {
     inner: &'a mut W,
     cipher: SupportedCipher,
     sector_size: u64,
@@ -678,7 +684,7 @@ struct EncryptedVolumeWriter<'a, W: Write + Seek> {
     buffer: Vec<u8>,
 }
 
-impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
+impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
     fn new(inner: &'a mut W, cipher: SupportedCipher, sector_size: u64, data_start: u64) -> Self {
         Self {
             inner,
@@ -693,30 +699,58 @@ impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
     fn flush_sector(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() { return Ok(()); }
         
-        let rem = self.buffer.len() % (self.sector_size as usize);
-        if rem != 0 {
-             // WARNING: Padding with zeros overrides existing data on disk.
-             // This is unsafe for random updates.
-             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Cannot flush partial sector without potential data loss"));
-        }
-        
         // Calculate sector index
-        // We assume writes are sequential for formatting usually, or we track position.
         // current_pos was advanced. buffer contains data ending at current_pos.
         // Start of buffer is at current_pos - buffer.len().
         let start_pos = self.current_pos - self.buffer.len() as u64;
         let start_sector = start_pos / self.sector_size;
         
+        let rem = self.buffer.len() % (self.sector_size as usize);
+        if rem != 0 {
+             // Partial sector. Perform Read-Modify-Write.
+             
+             // For the last partial part:
+             let padding_needed = (self.sector_size as usize) - rem;
+             
+             // We need to read `padding_needed` bytes from `current_pos`.
+             let old_pos = self.inner.stream_position()?;
+             let read_pos = self.data_start_offset + self.current_pos;
+             self.inner.seek(SeekFrom::Start(read_pos))?;
+             
+             let mut temp_buf = vec![0u8; padding_needed];
+             // Read exact or until EOF. If EOF, pad with zeros.
+             if let Ok(_) = self.inner.read_exact(&mut temp_buf) {
+                 self.buffer.extend_from_slice(&temp_buf);
+             } else {
+                 self.buffer.resize(self.buffer.len() + padding_needed, 0);
+             }
+             
+             // Restore position
+             self.inner.seek(SeekFrom::Start(old_pos))?;
+        }
+        
+        // Now buffer is aligned multiple of sector_size
         let mut chunks = self.buffer.chunks_exact_mut(self.sector_size as usize);
         let mut idx = start_sector;
         
-        for sector in chunks.by_ref() {
+        let units_per_sector = self.sector_size / 512;
+
+        for sector_data in chunks.by_ref() {
              // Encrypt
-             // Fix Bug 4: Tweak must be absolute unit number.
-             // We assume sector_size == 512 for now as used in create_volume.
-             // Tweak = (data_start_offset / sector_size) + idx
-             let tweak = (self.data_start_offset / 512) + idx;
-             self.cipher.encrypt_area(sector, self.sector_size as usize, tweak);
+             // Fix Bug: Tweak must be absolute unit number.
+             // Tweak Start = (data_start_offset / 512) + (sector_idx * units_per_sector)
+             let sector_tweak_start = (self.data_start_offset / 512) + (idx * units_per_sector);
+             
+             // Encrypt 512-byte units inside the sector
+             for i in 0..units_per_sector {
+                 let unit_off = (i * 512) as usize;
+                 let unit_tweak = sector_tweak_start + i;
+                 self.cipher.encrypt_area(
+                     &mut sector_data[unit_off..unit_off+512],
+                     512, 
+                     unit_tweak
+                 );
+             }
              idx += 1;
         }
         
@@ -729,7 +763,7 @@ impl<'a, W: Write + Seek> EncryptedVolumeWriter<'a, W> {
     }
 }
 
-impl<'a, W: Write + Seek> Write for EncryptedVolumeWriter<'a, W> {
+impl<'a, W: Read + Write + Seek> Write for EncryptedVolumeWriter<'a, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Simple buffering strategy: append to buffer.
         // If buffer gets too large (e.g. > 1MB), flush? 
@@ -751,7 +785,7 @@ impl<'a, W: Write + Seek> Write for EncryptedVolumeWriter<'a, W> {
     }
 }
 
-impl<'a, W: Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
+impl<'a, W: Read + Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         self.flush_sector()?; // Flush pending writes before seeking
         
@@ -2524,11 +2558,22 @@ pub fn change_password(
          file.seek(SeekFrom::Start(backup_offset)).map_err(|e| VolumeError::IoError(e))?;
          file.write_all(&encrypted_header).map_err(|e| VolumeError::IoError(e))?;
          file.sync_all().map_err(|e| VolumeError::IoError(e))?;
-    } else if volume.header_offset == 65536 && size >= 65536 {
-         let backup_offset = size - 65536;
-         file.seek(SeekFrom::Start(backup_offset)).map_err(|e| VolumeError::IoError(e))?;
-         file.write_all(&encrypted_header).map_err(|e| VolumeError::IoError(e))?;
-         file.sync_all().map_err(|e| VolumeError::IoError(e))?;
+    } else if volume.header_offset == 65536 {
+         // Fix Bug 5: Hidden Volume should NOT have a backup header.
+         // Writing to the end of the volume would reveal the hidden volume or corruption.
+         log::warn!("Skipping backup header write for Hidden Volume");
+    } else if size >= 65536 {
+         // Fallback logic for weird cases or standard handling if offset != 0?
+         // Standard is offset 0 -> Backup at End-128K
+         // If offset was 0, it was handled above.
+         // If logic falls here, it means header_offset != 0 and != 65536
+         // This block was:
+         // } else if volume.header_offset == 65536 && size >= 65536 {
+         //      let backup_offset = size - 65536; ...
+         // }
+         // The original code tried to write backup for hidden volume at `size - 65536`? 
+         // That's likely incorrect standard behavior anyway.
+         // We disable it.
     }
     
     Ok(())

@@ -281,51 +281,38 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
         let password_obj = unsafe { JByteArray::from_raw(password) };
         // Convert the Java byte array to a Rust Vec<u8>.
         let mut password_bytes = match env.convert_byte_array(&password_obj) {
-            // If successful, return the bytes.
-            Ok(b) => b,
-            // If an error occurs:
-            Err(e) => {
-                // Throw a Java IllegalArgumentException with the error message.
+             Ok(b) => Zeroizing::new(b),
+             Err(e) => {
                 let _ = env.throw_new(
                     "java/lang/IllegalArgumentException",
                     format!("Invalid password array: {}", e),
                 );
-                // Return -1 to indicate failure.
                 return -1;
-            }
+             }
         };
 
         // Convert the raw JByteArray header to a JByteArray object unsafely.
         let header_obj = unsafe { JByteArray::from_raw(header) };
         // Convert the Java byte array to a Rust Vec<u8>.
         let header_bytes = match env.convert_byte_array(&header_obj) {
-            // If successful, return the bytes.
-            Ok(b) => b,
-            // If an error occurs:
-            Err(e) => {
-                // Throw a Java IllegalArgumentException with the error message.
+             Ok(b) => Zeroizing::new(b),
+             Err(e) => {
                 let _ = env.throw_new(
                     "java/lang/IllegalArgumentException",
                     format!("Invalid header array: {}", e),
                 );
-                // Return -1 to indicate failure.
                 return -1;
-            }
+             }
         };
 
         // Handle the optional protection password.
         let mut protection_password_bytes = if !protection_password.is_null() {
-            // If the pointer is not null, convert it to a JByteArray object unsafely.
             let prot_obj = unsafe { JByteArray::from_raw(protection_password) };
-            // Attempt to convert the Java byte array to a Rust Vec<u8>.
             match env.convert_byte_array(&prot_obj) {
-                // If successful, wrap it in Some.
-                Ok(b) => Some(b),
+                // If successful, wrap it in Some and Zeroizing
+                Ok(b) => Some(Zeroizing::new(b)),
                 // If an error occurs:
-                Err(e) => {
-                    // Log a warning about the invalid array.
                     log::warn!("Invalid protection password array: {}", e);
-                    // Return None.
                     None
                 }
             }
