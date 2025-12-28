@@ -53,7 +53,8 @@ mod tests {
     #[test]
     fn test_create_volume_buffer_size() {
         // Just ensure it doesn't panic
-        let path = "/tmp/test_create_vol.hc";
+        let mut path = std::env::temp_dir();
+        path.push("test_create_vol.hc");
         let _ = std::fs::remove_file(path);
         let password = b"password";
         let pim = 0;

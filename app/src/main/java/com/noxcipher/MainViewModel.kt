@@ -1,9 +1,11 @@
+```
 package com.noxcipher
 
 import android.app.Application
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.noxcipher.util.PartitionUtils
@@ -67,44 +69,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@withLock
                     }
 
-                    val selected = if (specificDevice != null) {
-                        devices.firstOrNull { it.usbDevice == specificDevice }
+                    val candidateDevices = if (specificDevice != null) {
+                        devices.filter { it.usbDevice == specificDevice }
                     } else {
-                        devices.firstOrNull()
+                        devices
                     }
 
-                    if (selected == null) {
-                        _connectionResult.emit(ConnectionResult.Error("Selected USB device not found"))
-                        return@withLock
-                    }
-
-                    selected.init()
-                    activeDevice = selected
-
-                    var partitions: List<BlockDeviceDriver> = selected.partitions
-                    var rawDriver: BlockDeviceDriver? = null
-
-                    if (partitions.isEmpty()) {
-                        val debug = StringBuilder()
-                        rawDriver = tryCreateRawDriver(selected, debug)
-
-                        if (rawDriver != null) {
-                            var manual = PartitionUtils.parseGpt(rawDriver)
-                            if (manual.isEmpty()) manual = PartitionUtils.parseMbr(rawDriver)
-                            partitions = manual
-                        } else if (debug.isNotEmpty()) {
-                            _logs.emit(debug.toString())
-                        }
-                    }
-
-                    val targets = if (partitions.isNotEmpty()) partitions else listOfNotNull(rawDriver)
-                    if (targets.isEmpty()) {
-                        _connectionResult.emit(ConnectionResult.Error(context.getString(R.string.error_no_partitions)))
+                    if (candidateDevices.isEmpty()) {
+                        _connectionResult.emit(ConnectionResult.Error(if (specificDevice != null) "Selected USB device not found" else context.getString(R.string.error_no_mass_storage)))
                         return@withLock
                     }
 
                     var success = false
                     var lastError: String? = null
+
+                    // Iterate over all candidate devices (e.g. if one is a mouse or non-VC drive)
+                    for (selected in candidateDevices) {
+                        try {
+                            selected.init()
+                        } catch (e: Exception) {
+                            Log.w("MainViewModel", "Failed to init device ${selected.usbDevice.deviceName}", e)
+                            continue
+                        }
+
+                        // activeDevice = selected // Don't set yet, wait for success
+
+                        var partitions: List<BlockDeviceDriver> = selected.partitions
+                        var rawDriver: BlockDeviceDriver? = null
+
+                        if (partitions.isEmpty()) {
+                            val debug = StringBuilder()
+                            rawDriver = tryCreateRawDriver(selected, debug)
+
+                            if (rawDriver != null) {
+                                var manual = PartitionUtils.parseGpt(rawDriver)
+                                if (manual.isEmpty()) manual = PartitionUtils.parseMbr(rawDriver)
+                                partitions = manual
+                            } else if (debug.isNotEmpty()) {
+                                // Only emit logs if we fail completely later? Or just log?
+                                Log.d("MainViewModel", debug.toString())
+                            }
+                        }
+
+                        val targets = if (partitions.isNotEmpty()) partitions else listOfNotNull(rawDriver)
+                        if (targets.isEmpty()) {
+                            continue
+                        }
 
                     for (physicalDriver in targets) {
                         var localHandle: Long? = null
@@ -160,6 +170,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                                 }
                             }
+                            // Clear original password bytes
+                            RustNative.clearByteArray(password)
+                            }
 
                             if (localHandle == null || localHandle <= 0) {
                                 lastError = "Invalid password/PIM or not a VeraCrypt volume"
@@ -176,15 +189,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
                             } catch (e: Exception) {
                                 val callback = object : NativeReadCallback {
-                                    override fun read(offset: Long, length: Int): ByteArray {
-                                        val buffer = ByteBuffer.allocate(length)
-                                        return try {
-                                            physicalDriver.read(offset, buffer)
-                                            buffer.array()
-                                        } catch (_: Exception) {
-                                            ByteArray(0)
-                                        }
+                                    override fun read(offset: Long, buffer: ByteBuffer): Int {
+                                    return try {
+                                        val start = buffer.position()
+                                        physicalDriver.read(offset, buffer)
+                                        buffer.position() - start
+                                    } catch (e: Exception) {
+                                        Log.e("MainViewModel", "Error reading from physical driver", e)
+                                        -1
                                     }
+                                }
                                 }
 
                                 val fsHandle = RustNative.mountFs(localHandle, callback, volSize)
@@ -199,6 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             SessionManager.activeFileSystem = fs
                             _connectionResult.emit(ConnectionResult.Success)
                             success = true
+                            activeDevice = selected
                             break
                         } catch (e: Exception) {
                             lastError = e.message ?: "Unknown error"
@@ -206,6 +221,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             rustHandle = null
                         }
                     }
+                    if (success) break
+                }
 
                     try {
                         val nativeLogs = RustNative.getLogs()
@@ -248,6 +265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun closeConnection() {
         try {
             SessionManager.activeFileSystem = null
+            activeFileSystem?.close()
             activeFileSystem = null
 
             rustHandle?.let { RustNative.close(it) }

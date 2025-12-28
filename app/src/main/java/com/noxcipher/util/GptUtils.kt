@@ -18,12 +18,7 @@ class PartitionDriver(
 
     override fun read(deviceOffset: Long, buffer: ByteBuffer) {
         if (deviceOffset + buffer.remaining() > length) {
-            // Allow reading up to the end, truncate if necessary?
-            // Or just throw. Standard behavior is usually throw or read less.
-            // But ByteBuffer read doesn't return count.
-            // Let's be strict for now.
-             // throw IllegalArgumentException("Read out of bounds: offset=$deviceOffset, len=${buffer.remaining()}, partitionLen=$length")
-             // Actually, sometimes we read a bit past end? No.
+            throw IllegalArgumentException("Read out of bounds: offset=$deviceOffset, len=${buffer.remaining()}, partitionLen=$length")
         }
         // Ensure we don't read past end
         val limit = buffer.limit()

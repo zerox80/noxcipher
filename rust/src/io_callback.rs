@@ -48,70 +48,47 @@ impl Read for CallbackReader {
             io::Error::new(io::ErrorKind::Other, format!("JNI attach failed: {}", e))
         })?;
 
-        // Prepare arguments.
-        // Cap length at i32::MAX to prevent overflow when calling Java
-        let len = std::cmp::min(buf.len(), i32::MAX as usize) as i32;
+        // Create a DirectByteBuffer wrapping the mutable slice.
+        // UNSAFE: We must ensure Java does not retain reference to this ByteBuffer 
+        // after this call returns, as the underlying memory (buf) lifetime is bound to this function.
+        // Since we are calling a synchronous method 'read', and the ByteBuffer is local, this is active.
+        let buf_ptr = buf.as_mut_ptr();
+        let buf_len = buf.len();
+        
+        let byte_buffer = unsafe {
+            env.new_direct_byte_buffer(buf_ptr, buf_len).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("JNI BB creation failed: {}", e))
+            })?
+        };
+
         // Check for integer overflow when casting position to i64 (JNI limitation)
         let offset: i64 = self.position.try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "Offset too large for JNI (max 8EB)")
         })?;
 
-        // Call Java method: byte[] read(long offset, int length)
+        // Call Java method: int read(long offset, ByteBuffer buffer)
         let result = env
             .call_method(
                 &self.callback_obj,
                 "read",
-                "(JI)[B",
-                &[JValue::Long(offset), JValue::Int(len)],
+                "(JLjava/nio/ByteBuffer;)I",
+                &[JValue::Long(offset), JValue::Object(&byte_buffer)],
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JNI call failed: {}", e)))?;
+            .map_err(|e| {
+                let _ = env.exception_clear(); 
+                io::Error::new(io::ErrorKind::Other, format!("JNI call failed: {}", e))
+            })?;
 
-        // Get byte array from result.
-        let byte_array = result.l().map_err(|e| {
+        // Get int result.
+        let bytes_read = result.i().map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("JNI result error: {}", e))
         })?;
 
-        // Check for null (EOF or error).
-        if byte_array.is_null() {
-            return Ok(0);
+        if bytes_read < 0 {
+             return Err(io::Error::new(io::ErrorKind::Other, "Java read callback returned error (-1)"));
         }
 
-        // Wrap the JObject (array)
-        let ba_obj = unsafe { jni::objects::JByteArray::from_raw(byte_array.into_raw()) };
-
-        // Get the length of the array returned by Java.
-        let read_len = env.get_array_length(&ba_obj).map_err(|e| {
-             io::Error::new(io::ErrorKind::Other, format!("JNI array length error: {}", e))
-        })? as usize;
-
-        // Check if returned data fits in buffer.
-        // If Java returns more than we asked, it's a protocol violation or buffer overflow risk.
-        if read_len > buf.len() {
-             // We can't copy everything. Error out.
-             return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Java returned more bytes than requested",
-            ));
-        }
-
-        // Get the bytes directly into our buffer using generic JNI interface (if available in this version)
-        // or get_byte_array_region.
-        // We need a mutable slice of `i8` or `u8` depending on JNI crate version?
-        // `get_byte_array_region` takes `&mut [i8]` usually?
-        // Let's check `lib.rs` usage: `env.get_byte_array_region(&data_obj, 0, buf_slice)` where `buf_slice` is `&mut [i8]`.
-        // So we need to cast `buf` to `&mut [i8]`.
-        // This is safe because `u8` and `i8` have same layout.
-        
-        let buf_slice = unsafe {
-            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, read_len)
-        };
-
-        env.get_byte_array_region(&ba_obj, 0, buf_slice).map_err(|e| {
-             io::Error::new(io::ErrorKind::Other, format!("JNI copy failed: {}", e))
-        })?;
-
-        // Zeroize isn't needed for `buf` here (it's the output buffer, caller handles it).
-        // But we avoided the intermediate `Vec<u8>`.
+        let read_len = bytes_read as usize;
 
         // Update position.
         self.position += read_len as u64;

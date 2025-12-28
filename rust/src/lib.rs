@@ -606,6 +606,122 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
     }));
 }
 
+// Define a JNI function named Java_com_noxcipher_RustNative_decryptDirect.
+// It decrypts data in a direct ByteBuffer in place.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_decryptDirect(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    offset: jlong,
+    buffer: jni::objects::JObject,
+    position: jni::sys::jint,
+    length: jni::sys::jint,
+) {
+    let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if buffer.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Buffer cannot be null");
+             return;
+        }
+
+        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid direct buffer");
+                return;
+            }
+        };
+        
+        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+            Ok(c) => c,
+             Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Could not get buffer capacity");
+                return;
+            }
+        };
+
+        if position < 0 || length < 0 || (position as usize + length as usize) > capacity {
+             let _ = env.throw_new("java/lang/IndexOutOfBoundsException", "Invalid position/length");
+             return;
+        }
+
+        let offset_u64 = match u64::try_from(offset) {
+            Ok(o) => o,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative offset");
+                 return;
+            }
+        };
+
+        // Create slice
+        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
+        let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+
+        if let Err(e) = volume::decrypt(handle, offset_u64, target_slice) {
+             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
+        }
+    }));
+}
+
+// Define a JNI function named Java_com_noxcipher_RustNative_encryptDirect.
+// It encrypts data in a direct ByteBuffer in place.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_encryptDirect(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    offset: jlong,
+    buffer: jni::objects::JObject,
+    position: jni::sys::jint,
+    length: jni::sys::jint,
+) {
+    let _ = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if buffer.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Buffer cannot be null");
+             return;
+        }
+
+        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid direct buffer");
+                return;
+            }
+        };
+
+        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+            Ok(c) => c,
+             Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Could not get buffer capacity");
+                return;
+            }
+        };
+
+         if position < 0 || length < 0 || (position as usize + length as usize) > capacity {
+             let _ = env.throw_new("java/lang/IndexOutOfBoundsException", "Invalid position/length");
+             return;
+        }
+
+        let offset_u64 = match u64::try_from(offset) {
+            Ok(o) => o,
+            Err(_) => {
+                let _ = env.throw_new("java/lang/IllegalArgumentException", "Negative offset");
+                 return;
+            }
+        };
+
+        // Create slice
+        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
+        let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+
+        if let Err(e) = volume::encrypt(handle, offset_u64, target_slice) {
+             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
+        }
+    }));
+}
+
 // Define a JNI function named Java_com_noxcipher_RustNative_close.
 // It closes the volume context associated with the handle.
 #[no_mangle]

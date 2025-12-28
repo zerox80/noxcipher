@@ -102,6 +102,9 @@ class RustUsbFile(
         val buffer = ByteArray(len)
         // Call native readFile.
         val read = RustNative.readFile(fsHandle, path, offset, buffer)
+        if (read < 0) {
+            throw IOException("Native read failed")
+        }
         // Copy read data to destination buffer.
         if (read > 0) {
             destination.put(buffer, 0, read.toInt())
@@ -114,7 +117,9 @@ class RustUsbFile(
     }
     
     override fun flush() {}
-    override fun close() {}
+    override fun close() {
+        RustNative.closeFs(fsHandle)
+    }
     // Write operations gracefully fail or do nothing since we disabled flags.
     override fun createDirectory(name: String): UsbFile { throw IOException("Read-only") }
     override fun createFile(name: String): UsbFile { throw IOException("Read-only") }

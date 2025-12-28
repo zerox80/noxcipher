@@ -83,12 +83,23 @@ object RustNative {
     external fun decrypt(handle: Long, offset: Long, data: ByteArray)
 
     /**
+     * Decrypts a direct ByteBuffer in-place.
+     */
+    external fun decryptDirect(handle: Long, offset: Long, buffer: java.nio.ByteBuffer, position: Int, length: Int)
+
+    /**
      * Encrypts a buffer in-place.
      * @param handle The native context handle.
      * @param offset The absolute byte offset of the data (used for XTS tweak).
      * @param data The data to encrypt (in-place).
      */
     external fun encrypt(handle: Long, offset: Long, data: ByteArray)
+
+    /**
+     * Encrypts a direct ByteBuffer in-place.
+     */
+    external fun encryptDirect(handle: Long, offset: Long, buffer: java.nio.ByteBuffer, position: Int, length: Int)
+
 
     /**
      * Closes the native context.

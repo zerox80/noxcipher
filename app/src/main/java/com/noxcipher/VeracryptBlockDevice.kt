@@ -29,7 +29,10 @@ class VeracryptBlockDevice(
         // 2. Decrypt in-place
         val bytesRead = dest.position() - position
         if (bytesRead > 0) {
-            if (dest.hasArray()) {
+            if (dest.isDirect) {
+                // Zero-copy path for direct buffers
+                RustNative.decryptDirect(rustHandle, offset, dest, position, bytesRead)
+            } else if (dest.hasArray()) {
                 val array = dest.array()
                 val arrayOffset = dest.arrayOffset() + position
                 
@@ -66,6 +69,8 @@ class VeracryptBlockDevice(
         
         if (length <= 0) return
 
+        // We must copy data to a temporary buffer to avoid modifying the source buffer during encryption
+        // (BlockDeviceDriver.write contract implies source is read-only usually, or at least shouldn't be garbled)
         val buffer = ByteArray(length)
         
         if (src.hasArray()) {
