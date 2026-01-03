@@ -113,6 +113,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                         val targets = if (partitions.isNotEmpty()) partitions else listOfNotNull(rawDriver)
                         if (targets.isEmpty()) {
+                            selected.close() // Close device if no partitions found
                             continue
                         }
 
@@ -122,6 +123,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val volSize = safeVolumeSize(physicalDriver)
                             if (volSize <= 0) {
                                 lastError = "Unable to determine volume size"
+                                selected.close()
                                 continue
                             }
 
@@ -134,11 +136,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                             if (isAllZeros(headerBytes)) {
                                 lastError = "Skipped: Header is all zeros"
+                                selected.close()
                                 continue
                             }
 
                             if (isCommonFileSystem(headerBytes)) {
                                 lastError = "Skipped: Detected unencrypted filesystem"
+                                selected.close()
                                 continue
                             }
 
@@ -176,6 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                             if (localHandle == null || localHandle <= 0) {
                                 lastError = "Invalid password/PIM or not a VeraCrypt volume"
+                                selected.close()
                                 continue
                             }
 

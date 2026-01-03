@@ -1124,6 +1124,66 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     }
 }
 
+// Define a JNI function named Java_com_noxcipher_RustNative_readFileDirect.
+// It reads content from a file in the mounted file system directly into a ByteBuffer.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_readFileDirect(
+    mut env: JNIEnv,
+    _class: JClass,
+    fs_handle: jlong,
+    path_obj: jni::objects::JString,
+    offset: jlong,
+    buffer: jni::objects::JObject,
+    position: jni::sys::jint,
+    length: jni::sys::jint,
+) -> jlong {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path: String = match env.get_string(&path_obj) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+
+        if buffer.is_null() { return -1; }
+
+        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+            Ok(p) => p,
+            Err(_) => return -1,
+        };
+        
+        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+            Ok(c) => c,
+             Err(_) => return -1,
+        };
+
+        if position < 0 || length < 0 || (position as usize + length as usize) > capacity {
+             return -1;
+        }
+
+        // Access filesystem
+        if let Ok(lock) = FILESYSTEMS.read() {
+            if let Some(fs_arc) = lock.get(&fs_handle) {
+                if let Ok(mut fs) = fs_arc.lock() {
+                    // Create slice from direct buffer
+                    let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
+                    let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+                    
+                    match fs.read_file(&path, offset as u64, target_slice) {
+                        Ok(bytes_read) => return bytes_read as jlong,
+                        Err(_) => return -1,
+                    }
+                }
+            }
+        }
+        -1
+    }));
+    
+    match result {
+        Ok(val) => val,
+        Err(_) => -1,
+    }
+}
+
 
 
 

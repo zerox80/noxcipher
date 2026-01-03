@@ -140,6 +140,7 @@ object RustNative {
      * @return The number of bytes read, or -1 if failed.
      */
     external fun readFile(fsHandle: Long, path: String, offset: Long, buffer: ByteArray): Long
+    external fun readFileDirect(fsHandle: Long, path: String, offset: Long, buffer: java.nio.ByteBuffer, position: Int, length: Int): Long
 
     /**
      * Closes the file system.
