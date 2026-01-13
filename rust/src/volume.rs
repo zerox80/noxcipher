@@ -699,49 +699,62 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
     fn flush_sector(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() { return Ok(()); }
         
-        // Calculate sector index
-        // current_pos was advanced. buffer contains data ending at current_pos.
-        // Start of buffer is at current_pos - buffer.len().
+        // Calculate start position of the data currently in buffer
         let start_pos = self.current_pos - self.buffer.len() as u64;
         let start_sector = start_pos / self.sector_size;
+        let start_offset = (start_pos % self.sector_size) as usize;
         
+        let old_pos = self.inner.stream_position()?;
+
+        // 1. Handle Head Alignment (Prefix)
+        if start_offset != 0 {
+            // We need to read the prefix of the sector from disk to align the buffer start
+            let prefix_len = start_offset;
+            let mut prefix = vec![0u8; prefix_len];
+            
+            let read_pos = self.data_start_offset + (start_sector * self.sector_size);
+            self.inner.seek(SeekFrom::Start(read_pos))?;
+            
+            // Attempt to read prefix.
+            if let Err(e) = self.inner.read_exact(&mut prefix) {
+                 // If read fails (e.g. EOF), we pad with zeros, though strictly this shouldn't happen 
+                 // if we are writing into an existing volume. 
+                 log::warn!("Failed to read prefix for RMW: {}", e);
+            }
+
+            // Prepend prefix to buffer
+            let mut new_buf = prefix;
+            new_buf.extend_from_slice(&self.buffer);
+            self.buffer = new_buf;
+        }
+        
+        // 2. Handle Tail Alignment (Suffix)
         let rem = self.buffer.len() % (self.sector_size as usize);
         if rem != 0 {
-             // Partial sector. Perform Read-Modify-Write.
-             
-             // For the last partial part:
              let padding_needed = (self.sector_size as usize) - rem;
+             let mut suffix = vec![0u8; padding_needed];
              
-             // We need to read `padding_needed` bytes from `current_pos`.
-             let old_pos = self.inner.stream_position()?;
-             let read_pos = self.data_start_offset + self.current_pos;
+             // Calculate read position for suffix: Disk Start + Buffer Len (which includes prefix now)
+             let read_pos = self.data_start_offset + (start_sector * self.sector_size) + self.buffer.len() as u64;
              self.inner.seek(SeekFrom::Start(read_pos))?;
              
-             let mut temp_buf = vec![0u8; padding_needed];
-             // Read exact or until EOF. If EOF, pad with zeros.
-             if let Ok(_) = self.inner.read_exact(&mut temp_buf) {
-                 self.buffer.extend_from_slice(&temp_buf);
+             if let Ok(_) = self.inner.read_exact(&mut suffix) {
+                 self.buffer.extend_from_slice(&suffix);
              } else {
                  self.buffer.resize(self.buffer.len() + padding_needed, 0);
              }
-             
-             // Restore position
-             self.inner.seek(SeekFrom::Start(old_pos))?;
         }
         
-        // Now buffer is aligned multiple of sector_size
+        // Now buffer is aligned to sector boundaries and starts at start_sector
         let mut chunks = self.buffer.chunks_exact_mut(self.sector_size as usize);
         let mut idx = start_sector;
         
         let units_per_sector = self.sector_size / 512;
 
         for sector_data in chunks.by_ref() {
-             // Encrypt
-             // Fix Bug: Tweak must be absolute unit number.
-             // Tweak Start = (data_start_offset / 512) + (sector_idx * units_per_sector)
+             // Encrypt using correct tweak
              let sector_tweak_start = (self.data_start_offset / 512) + (idx * units_per_sector);
              
-             // Encrypt 512-byte units inside the sector
              for i in 0..units_per_sector {
                  let unit_off = (i * 512) as usize;
                  let unit_tweak = sector_tweak_start + i;
@@ -754,9 +767,13 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
              idx += 1;
         }
         
-        // Write to inner
-        self.inner.seek(SeekFrom::Start(self.data_start_offset + start_pos))?;
+        // Write to inner at aligned position
+        let write_pos = self.data_start_offset + (start_sector * self.sector_size);
+        self.inner.seek(SeekFrom::Start(write_pos))?;
         self.inner.write_all(&self.buffer)?;
+        
+        // Restore position
+        self.inner.seek(SeekFrom::Start(old_pos))?;
         
         self.buffer.clear();
         Ok(())
