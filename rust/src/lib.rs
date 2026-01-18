@@ -94,6 +94,7 @@ impl log::Log for InMemoryLogger {
                     buffer.pop_front();
                 }
                 // Push the new log message into the buffer.
+                buffer.push_back(format!("{}", record.args()));
             }
         }
     }

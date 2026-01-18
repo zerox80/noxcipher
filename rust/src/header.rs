@@ -213,18 +213,19 @@ impl VolumeHeader {
         // For versions older than 5, the sector size is fixed at 512 bytes.
         // However, if the read sector size is 0 or invalid (e.g. from a fresh init), we might want to default it.
         // But if it was read as something else, we should probably respect it or fail?
+        // For versions older than 5, the sector size is fixed at 512 bytes.
+        // However, if the read sector size is 0 or invalid (e.g. from a fresh init), we might want to default it.
+        // But if it was read as something else, we should probably respect it or fail?
         // VeraCrypt implementation forces 512 for < 5.
-        let mut sector_size = 0;
-        if version >= 5 {
+        
+        let mut sector_size = if version >= 5 {
             // Version 5+: Sector size is at offset 64
-             sector_size = BigEndian::read_u32(&decrypted[64..68]);
-             if sector_size == 0 {
-                sector_size = 512;
-            }
+             let s = BigEndian::read_u32(&decrypted[64..68]);
+             if s == 0 { 512 } else { s }
         } else {
              // Version < 5: Strictly 512 bytes
-             sector_size = 512;
-        }
+             512
+        };
 
         // Validate sector size
         if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 || !sector_size.is_power_of_two() {
