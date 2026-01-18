@@ -337,7 +337,7 @@ impl VolumeHeader {
             master_key_data,
             salt,
             pim,
-        }
+        })
     }
 
     // Function to serialize the VolumeHeader into a byte buffer.

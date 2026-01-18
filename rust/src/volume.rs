@@ -39,7 +39,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
 
 // Define an enumeration for volume-related errors.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 #[allow(unused_assignments)]
 pub enum VolumeError {
@@ -307,10 +307,12 @@ impl Volume {
             // Here start_offset is logical.
             // We must convert start_offset to physical.
             // Calculate physical start offset.
-            let phys_start = self.header.encrypted_area_start.checked_add(start_offset)
+            let phys_start = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
+                .and_then(|sum| sum.checked_add(start_offset))
                 .ok_or(VolumeError::CryptoError("Protected range physical start overflow".to_string()))?;
             // Calculate physical end offset.
-            let phys_end = self.header.encrypted_area_start.checked_add(end_offset)
+            let phys_end = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
+                .and_then(|sum| sum.checked_add(end_offset))
                 .ok_or(VolumeError::CryptoError("Protected range physical end overflow".to_string()))?;
 
             // Check if the write operation overlaps with the protected range.
@@ -551,7 +553,7 @@ pub fn create_context(
             
             // Check overflow for + 512
             if backup_offset.checked_add(512).map_or(false, |end| (header_bytes.len() as u64) >= end) {
-                 if let Ok(vol) = try_header_at_offset(
+                 if let Ok(mut vol) = try_header_at_offset(
                     password, 
                     header_bytes, 
                     pim, 
@@ -717,9 +719,8 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
             
             // Attempt to read prefix.
             if let Err(e) = self.inner.read_exact(&mut prefix) {
-                 // If read fails (e.g. EOF), we pad with zeros, though strictly this shouldn't happen 
-                 // if we are writing into an existing volume. 
-                 log::warn!("Failed to read prefix for RMW: {}", e);
+                 // Propagate error to avoid data corruption
+                 return Err(e);
             }
 
             // Prepend prefix to buffer
@@ -923,8 +924,8 @@ pub fn create_volume(
         encrypted_area_length, // encrypted_area_length
         0, // flags
         sector_size, // sector_size
-        mk_arr,
-        salt_arr,
+        *mk_arr,
+        *salt_arr,
         pim
     ).map_err(|e| VolumeError::CryptoError(e))?;
 
@@ -936,12 +937,12 @@ pub fn create_volume(
     // Encrypt header with derived key using SELECTED cipher and PRF
     // Header Key size depends on cipher type (same as master key size usually)
     let mut header_key = Zeroizing::new([0u8; 192]);
-    derive_key_generic(password, salt, pim, &mut header_key, prf);
+    derive_key_generic(password, salt, pim, &mut *header_key, prf);
     
     let enc_part = &mut encrypted_header[64..512];
     
     // Encrypt Header
-    let header_cipher = create_cipher(cipher_type, &header_key)?;
+    let header_cipher = create_cipher(cipher_type, &*header_key)?;
     header_cipher.encrypt_area(enc_part, 448, 0); // Tweak 0 for header
     
     // Write Primary Header
@@ -1065,7 +1066,7 @@ fn try_header_at_offset(
         }
 
         // Try Twofish
-        match try_cipher_twofish(
+        match try_cipher::<TwofishWrapper>(
             key,
             encrypted_header,
             partition_start_offset, hv_opt,
@@ -1181,9 +1182,9 @@ fn try_header_at_offset(
     for (idx, &iter) in iterations_list.iter().enumerate() {
         // 1. SHA-512
         // Derive key using PBKDF2-HMAC-SHA512.
-        pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<Hmac<Sha512>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Sha512, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Sha512, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1193,9 +1194,9 @@ fn try_header_at_offset(
 
         // 2. SHA-256
         // Derive key using PBKDF2-HMAC-SHA256.
-        pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<Hmac<Sha256>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Sha256, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Sha256, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1205,9 +1206,9 @@ fn try_header_at_offset(
 
         // 3. Whirlpool
         // Derive key using PBKDF2-HMAC-Whirlpool.
-        pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Whirlpool, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Whirlpool, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1219,9 +1220,9 @@ fn try_header_at_offset(
         // Blake2s default is 500,000. System/Boot is 200,000. PIM is pim*2048.
         // We just use `iter` from the list which covers these cases.
         // Derive key using PBKDF2-SimpleHmac-Blake2s256.
-        pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Blake2s, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Blake2s, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1231,9 +1232,9 @@ fn try_header_at_offset(
 
         // 5. Streebog
         // Derive key using PBKDF2-SimpleHmac-Streebog512.
-        pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Streebog, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Streebog, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1269,9 +1270,9 @@ fn try_header_at_offset(
 
         if run_ripemd {
             // Derive key using PBKDF2-HMAC-Ripemd160.
-            pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut header_key).ok();
+            pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut *header_key).ok();
             // Try to unlock.
-            match try_unlock(&header_key, PrfAlgorithm::Ripemd160, &mut last_debug) {
+            match try_unlock(&*header_key, PrfAlgorithm::Ripemd160, &mut last_debug) {
                 Ok(vol) => {
                     header_key.zeroize();
                     return Ok(vol);
@@ -1282,9 +1283,9 @@ fn try_header_at_offset(
 
         // 7. SHA-1 (Legacy)
         // Derive key using PBKDF2-HMAC-SHA1.
-        pbkdf2::<Hmac<Sha1>>(password, salt, iter, &mut header_key).ok();
+        pbkdf2::<Hmac<Sha1>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
-        match try_unlock(&header_key, PrfAlgorithm::Sha1, &mut last_debug) {
+        match try_unlock(&*header_key, PrfAlgorithm::Sha1, &mut last_debug) {
             Ok(vol) => {
                 header_key.zeroize();
                 return Ok(vol);
@@ -1436,7 +1437,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     sector_buffer[64..512].copy_from_slice(encrypted_header);
 
     // Decrypt the full 512-byte sector using tweak 0.
-    cipher_enum.decrypt_area(&mut sector_buffer, 512, 0);
+    cipher_enum.decrypt_area(&mut *sector_buffer, 512, 0);
 
     // Create a buffer for the decrypted header (448 bytes).
     let mut decrypted = Zeroizing::new([0u8; 448]);
@@ -1444,7 +1445,7 @@ fn try_cipher<C: BlockCipher + KeySizeUser + KeyInit>(
     decrypted.copy_from_slice(&sector_buffer[64..512]);
 
     // Try to deserialize the decrypted header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         // Found it! Now derive the master keys for the volume data.
         // The master keys are in the decrypted header at offset 192.
         // We need to create the volume cipher using these keys.
@@ -1499,10 +1500,10 @@ fn try_cipher_serpent(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         // Create volume cipher with master keys.
         let mk = &header.master_key_data;
         let c1 = SerpentWrapper::new(mk[0..32].into());
@@ -1560,10 +1561,10 @@ fn try_cipher_aes_twofish(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Keys in master key area:
         // VeraCrypt AESTwofish: Key[0..32]->Twofish, Key[32..64]->AES.
@@ -1640,10 +1641,10 @@ fn try_cipher_aes_twofish_serpent(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1714,10 +1715,10 @@ fn try_cipher_serpent_aes(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1785,10 +1786,10 @@ fn try_cipher_twofish_serpent(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1863,11 +1864,11 @@ fn try_cipher_serpent_twofish_aes(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -1999,10 +2000,10 @@ fn try_cipher_camellia_kuznyechik(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -2073,10 +2074,10 @@ fn try_cipher_camellia_serpent(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -2144,10 +2145,10 @@ fn try_cipher_kuznyechik_aes(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -2226,10 +2227,10 @@ fn try_cipher_kuznyechik_serpent_camellia(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -2306,10 +2307,10 @@ fn try_cipher_kuznyechik_twofish(
     // Decrypt header.
     let mut decrypted = Zeroizing::new([0u8; 448]);
     decrypted.copy_from_slice(encrypted_header);
-    cipher_enum.decrypt_area(&mut decrypted, 448, 0);
+    cipher_enum.decrypt_area(&mut *decrypted, 448, 0);
 
     // Deserialize header.
-    if let Ok(header) = VolumeHeader::deserialize(&decrypted, salt, pim) {
+    if let Ok(header) = VolumeHeader::deserialize(&*decrypted, salt, pim) {
         let mk = &header.master_key_data;
         // Extract master keys.
         // Primary Keys
@@ -2411,7 +2412,7 @@ pub fn change_password(
 
     // Derive new header key using the selected PRF
     let mut new_header_key = Zeroizing::new([0u8; 192]); 
-    derive_key_generic(new_password, &salt_arr, new_pim, &mut new_header_key, Some(active_prf));
+    derive_key_generic(new_password, &*salt_arr, new_pim, &mut *new_header_key, active_prf);
 
     // Weak key check
     for i in (0..192).step_by(64) {
@@ -2501,8 +2502,7 @@ pub fn change_password(
              );
              encrypt_header_ops(&c, &mut encrypted_header);
         },
-             encrypt_header_ops(&SupportedCipher::SerpentTwofishAes(c_s, c_tf, c_aes), &mut encrypted_header);
-        },
+
         SupportedCipher::CamelliaKuznyechik(_, _) => {
              // Camellia(0), Kuznyechik(32)
              let k_c1 = &key_slice[0..32];

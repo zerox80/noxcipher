@@ -69,7 +69,7 @@ impl Read for CallbackReader {
         // Call Java method: int read(long offset, ByteBuffer buffer)
         let result = env
             .call_method(
-                &self.callback_obj,
+                &*self.callback_obj,
                 "read",
                 "(JLjava/nio/ByteBuffer;)I",
                 &[JValue::Long(offset), JValue::Object(&byte_buffer)],

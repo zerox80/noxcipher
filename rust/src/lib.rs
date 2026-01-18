@@ -1,7 +1,7 @@
 // Import the JNIEnv type from the jni crate to interact with the Java Native Interface environment.
 use jni::JNIEnv;
 // Import JClass and JByteArray types from the jni::objects module for handling Java classes and byte arrays.
-use jni::objects::{JByteArray, JClass, JString};
+use jni::objects::{JByteArray, JClass, JString, JObject};
 // Import jbyteArray and jlong types from the jni::sys module, representing Java's byte[] and long types.
 use jni::sys::{jbyteArray, jlong};
 
@@ -144,7 +144,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
             // If successful, clone the vector of strings.
             Ok(buffer) => buffer.clone(),
             // If the lock fails (e.g., poisoned), return a vector with an error message.
-            Err(_) => vec!["Failed to lock log buffer".to_string()],
+            Err(_) => std::collections::VecDeque::from(vec!["Failed to lock log buffer".to_string()]),
         };
 
         // Find the java.lang.String class in the JVM.
@@ -164,7 +164,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
         // Expect success.
         let array = env
             .new_object_array(logs.len() as i32, string_class, empty_string)
-            .unwrap_or(std::ptr::null_mut()); // Use unwrap_or to just return null if fail
+            .unwrap_or(JObject::null().into()); // use JObject::null() which is compatible with jobjectArray return (in wrapper)
             
         if array.is_null() {
             return std::ptr::null_mut();
@@ -312,7 +312,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             match env.convert_byte_array(&prot_obj) {
                 // If successful, wrap it in Some and Zeroizing
                 Ok(b) => Some(Zeroizing::new(b)),
-                // If an error occurs:
+                Err(e) => {
                     log::warn!("Invalid protection password array: {}", e);
                     None
                 }
@@ -348,7 +348,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_init(
             protection_password_bytes.as_deref().map(|z| z.as_slice()),
             protection_pim,
             volume_size_u64,
-            backup_header_bytes.as_deref().map(|z| z.as_slice()),
+            backup_header_bytes.as_deref().map(|z| z),
         );
 
         // Explicit zeroize is redundant if we use Zeroizing, but keeping for clarity/legacy correctness
@@ -626,7 +626,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decryptDirect(
              return;
         }
 
-        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+        let buf_ptr = match env.get_direct_buffer_address((&buffer).into()) {
             Ok(p) => p,
             Err(_) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid direct buffer");
@@ -634,7 +634,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decryptDirect(
             }
         };
         
-        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+        let capacity = match env.get_direct_buffer_capacity((&buffer).into()) {
             Ok(c) => c,
              Err(_) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Could not get buffer capacity");
@@ -684,7 +684,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encryptDirect(
              return;
         }
 
-        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+        let buf_ptr = match env.get_direct_buffer_address((&buffer).into()) {
             Ok(p) => p,
             Err(_) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid direct buffer");
@@ -692,7 +692,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encryptDirect(
             }
         };
 
-        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+        let capacity = match env.get_direct_buffer_capacity((&buffer).into()) {
             Ok(c) => c,
              Err(_) => {
                 let _ = env.throw_new("java/lang/IllegalArgumentException", "Could not get buffer capacity");
@@ -853,7 +853,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
         let decrypted_reader = DecryptedReader::new(reader, volume);
 
         // Try mounting as NTFS.
-        if let Ok(ntfs_instance) = Ntfs::new(decrypted_reader.clone()) {
+        if let Ok(ntfs_instance) = Ntfs::new(&mut decrypted_reader.clone()) {
             let mut lock = match FILESYSTEMS.write() {
                 Ok(l) => l,
                 Err(e) => e.into_inner(),
@@ -867,13 +867,13 @@ pub extern "system" fn Java_com_noxcipher_RustNative_mountFs(
             let handle = *handle_lock;
             *handle_lock += 1;
             
-            lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs(Box::new(ntfs_instance)))));
+            lock.insert(handle, Arc::new(Mutex::new(SupportedFileSystem::Ntfs { fs: Box::new(ntfs_instance), reader: decrypted_reader.clone() })));
             return Ok(handle);
         }
 
         // Try mounting as exFAT.
         // We use the same reader clone (DecryptedReader is cheap to clone).
-        if let Ok(exfat_instance) = ExFat::new(decrypted_reader) {
+        if let Ok(exfat_instance) = ExFat::open(decrypted_reader) {
              let mut lock = match FILESYSTEMS.write() {
                 Ok(l) => l,
                 Err(e) => e.into_inner(),
@@ -959,12 +959,9 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
                      }
                  }
             } else {
-                std::collections::VecDeque::new() // Not quite right type
-                // Wait, list_files returns Vec<FileInfo>. The default return for JNI should match.
-                // list_files returns io::Result<Vec<FileInfo>>. unwrap_or_default() returns Vec<FileInfo>.
-                // So here we need to return Vec::new().
                 Vec::new()
             }
+
         };
 
         // Find the com.noxcipher.RustFile class.
@@ -1025,8 +1022,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
             
             if let Ok(obj_ref) = obj {
                  // Set the array element at index i.
-                 if let Err(e) = env.set_object_array_element(&array, i as i32, obj_ref) {
-                     log::warn!("Failed to set array element: {}", e);
+                 if let Err(e) = env.set_object_array_element(&array, i as i32, &obj_ref) {
+                     log::warn!("Failed to set array element: {:?}", e);
                  }
                  // Delete local ref to prevent overflow in large loops.
                  env.delete_local_ref(obj_ref).unwrap_or_default();
@@ -1036,7 +1033,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_listFiles(
             // new_string returned a JString which is a JObject.
             // But we actually need to be careful with types.
             // name_jstr is a JString.
-             env.delete_local_ref(name_jstr.into()).unwrap_or_default();
+             env.delete_local_ref(name_jstr).unwrap_or_default();
         }
 
         // Return the raw pointer to the array.
@@ -1147,12 +1144,12 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFileDirect(
 
         if buffer.is_null() { return -1; }
 
-        let buf_ptr = match env.get_direct_buffer_address(&buffer) {
+        let buf_ptr = match env.get_direct_buffer_address((&buffer).into()) {
             Ok(p) => p,
             Err(_) => return -1,
         };
         
-        let capacity = match env.get_direct_buffer_capacity(&buffer) {
+        let capacity = match env.get_direct_buffer_capacity((&buffer).into()) {
             Ok(c) => c,
              Err(_) => return -1,
         };
@@ -1296,7 +1293,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
         };
         
         // Call create_volume_file
-        match volume::create_volume_file(
+        match volume::create_volume(
             &path_str,
             &password_bytes,
             pim,

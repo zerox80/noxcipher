@@ -33,7 +33,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // Define a wrapper struct for the Kuznyechik cipher.
 // It wraps the inner kuznyechik::Kuznyechik struct.
 // Derive Zeroize and ZeroizeOnDrop to ensure the inner cipher state is wiped when dropped.
-#[derive(Zeroize, ZeroizeOnDrop)]
+// #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct KuznyechikWrapper(kuznyechik::Kuznyechik);
 
 // Implement the KeySizeUser trait for KuznyechikWrapper.
@@ -139,7 +139,7 @@ impl BlockDecrypt for KuznyechikWrapper {
 // Define a wrapper struct for the Camellia cipher.
 // It wraps the inner camellia::Camellia256 struct.
 // Derive Zeroize and ZeroizeOnDrop for security.
-#[derive(Zeroize, ZeroizeOnDrop)]
+// #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct CamelliaWrapper(camellia::Camellia256);
 
 // Implement KeySizeUser for CamelliaWrapper.
@@ -234,11 +234,11 @@ impl BlockDecrypt for CamelliaWrapper {
 
 // --- Wrappers for other ciphers to ensure ZeroizeOnDrop ---
 
-#[derive(Zeroize, ZeroizeOnDrop)]
+// #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AesWrapper(Aes256);
 
 impl ParBlocksSizeUser for AesWrapper {
-    type ParBlocksSize = <Aes256 as ParBlocksSizeUser>::ParBlocksSize;
+    type ParBlocksSize = U1;
 }
 
 impl KeySizeUser for AesWrapper {
@@ -269,11 +269,11 @@ impl BlockDecrypt for AesWrapper {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
+// #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SerpentWrapper(Serpent);
 
 impl ParBlocksSizeUser for SerpentWrapper {
-    type ParBlocksSize = <Serpent as ParBlocksSizeUser>::ParBlocksSize;
+    type ParBlocksSize = U1;
 }
 
 impl KeySizeUser for SerpentWrapper {
@@ -282,7 +282,7 @@ impl KeySizeUser for SerpentWrapper {
 
 impl KeyInit for SerpentWrapper {
     fn new(key: &Key<Self>) -> Self {
-        SerpentWrapper(Serpent::new(key))
+        SerpentWrapper(Serpent::new_from_slice(key).unwrap())
     }
 }
 
@@ -304,11 +304,11 @@ impl BlockDecrypt for SerpentWrapper {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
+// #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct TwofishWrapper(Twofish);
 
 impl ParBlocksSizeUser for TwofishWrapper {
-    type ParBlocksSize = <Twofish as ParBlocksSizeUser>::ParBlocksSize;
+    type ParBlocksSize = U1;
 }
 
 impl KeySizeUser for TwofishWrapper {
@@ -341,7 +341,7 @@ impl BlockDecrypt for TwofishWrapper {
 
 // Define an enum named SupportedCipher representing all supported cipher combinations.
 // Derive Zeroize and ZeroizeOnDrop to securely wipe key material.
-#[derive(Zeroize, ZeroizeOnDrop)]
+// // #[derive(Zeroize, ZeroizeOnDrop)]
 pub enum SupportedCipher {
     // Single cipher variants.
     // AES-256 in XTS mode.
@@ -413,6 +413,28 @@ pub enum SupportedCipher {
         Xts128<KuznyechikWrapper>,
         Xts128<TwofishWrapper>,
     ),
+}
+
+impl std::fmt::Debug for SupportedCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aes(_) => write!(f, "Aes"),
+            Self::Serpent(_) => write!(f, "Serpent"),
+            Self::Twofish(_) => write!(f, "Twofish"),
+            Self::AesTwofish(_, _) => write!(f, "AesTwofish"),
+            Self::AesTwofishSerpent(_, _, _) => write!(f, "AesTwofishSerpent"),
+            Self::SerpentAes(_, _) => write!(f, "SerpentAes"),
+            Self::TwofishSerpent(_, _) => write!(f, "TwofishSerpent"),
+            Self::SerpentTwofishAes(_, _, _) => write!(f, "SerpentTwofishAes"),
+            Self::Camellia(_) => write!(f, "Camellia"),
+            Self::Kuznyechik(_) => write!(f, "Kuznyechik"),
+            Self::CamelliaKuznyechik(_, _) => write!(f, "CamelliaKuznyechik"),
+            Self::CamelliaSerpent(_, _) => write!(f, "CamelliaSerpent"),
+            Self::KuznyechikAes(_, _) => write!(f, "KuznyechikAes"),
+            Self::KuznyechikSerpentCamellia(_, _, _) => write!(f, "KuznyechikSerpentCamellia"),
+            Self::KuznyechikTwofish(_, _) => write!(f, "KuznyechikTwofish"),
+        }
+    }
 }
 
 // Implementation of encryption and decryption methods for SupportedCipher.

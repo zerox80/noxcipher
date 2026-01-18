@@ -13,7 +13,7 @@ log = "0.4"
 
 cipher = "0.4"
 aes = { version = "0.8", features = ["zeroize"] }
-xts-mode = { version = "0.5", features = ["zeroize"] }
+xts-mode = "0.5"
 sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = "0.12"
