@@ -183,10 +183,12 @@ class MainActivity : AppCompatActivity() {
             val passwordBytes = ByteArray(passwordText.length)
             for (i in passwordText.indices) {
                 passwordBytes[i] = passwordText[i].code.toByte()
+                passwordText.replace(i, i + 1, "0")
             }
             passwordText.clear()
 
             // Pass null to let ViewModel scan all available devices
+            // Note: passwordBytes will be cleared inside the ViewModel once used
             connectDevice(null, passwordBytes, pim)
 
             return

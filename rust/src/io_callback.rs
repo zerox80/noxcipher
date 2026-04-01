@@ -48,18 +48,27 @@ impl Read for CallbackReader {
             io::Error::new(io::ErrorKind::Other, format!("JNI attach failed: {}", e))
         })?;
 
-        // Create a DirectByteBuffer wrapping the mutable slice.
-        // UNSAFE: We must ensure Java does not retain reference to this ByteBuffer 
-        // after this call returns, as the underlying memory (buf) lifetime is bound to this function.
-        // Since we are calling a synchronous method 'read', and the ByteBuffer is local, this is active.
-        let buf_ptr = buf.as_mut_ptr();
         let buf_len = buf.len();
-        
-        let byte_buffer = unsafe {
-            env.new_direct_byte_buffer(buf_ptr, buf_len).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("JNI BB creation failed: {}", e))
+
+        let byte_array = env.new_byte_array(buf_len as i32).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("JNI array creation failed: {}", e))
+        })?;
+
+        let byte_buffer = env
+            .call_static_method(
+                "java/nio/ByteBuffer",
+                "wrap",
+                "([B)Ljava/nio/ByteBuffer;",
+                &[JValue::Object(&byte_array)],
+            )
+            .map_err(|e| {
+                let _ = env.exception_clear();
+                io::Error::new(io::ErrorKind::Other, format!("JNI ByteBuffer.wrap failed: {}", e))
             })?
-        };
+            .l()
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("JNI ByteBuffer.wrap result error: {}", e))
+            })?;
 
         // Check for integer overflow when casting position to i64 (JNI limitation)
         let offset: i64 = self.position.try_into().map_err(|_| {
@@ -90,10 +99,22 @@ impl Read for CallbackReader {
         })?;
 
         if bytes_read < 0 {
+             let _ = env.delete_local_ref(byte_array);
              return Err(io::Error::new(io::ErrorKind::Other, "Java read callback returned error (-1)"));
         }
 
         let read_len = bytes_read as usize;
+
+        if read_len > 0 {
+            // SAFE COPY: Use get_byte_array_region to copy data from the Java byte[] 
+            // back to the Rust buffer. This is the safe way to handle JNI memory.
+            env.get_byte_array_region(&byte_array, 0, buf[..read_len].as_mut())
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("JNI array region copy failed: {}", e))
+                })?;
+        }
+
+        let _ = env.delete_local_ref(byte_array);
 
         // Update position.
         self.position += read_len as u64;
