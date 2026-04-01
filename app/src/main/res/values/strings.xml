@@ -6,7 +6,8 @@
     <string name="hint_pim">PIM (Default: 0)</string>
     <string name="btn_list_devices">Unlock Device</string>
     <string name="tv_log_default">Logs will appear here...</string>
-    <string name="toast_permission_granted">Permission granted. Please click \'List Devices\' again.</string>
+    <string name="toast_permission_granted">Permission granted. Retrying unlock.</string>
+    <string name="toast_permission_denied">USB permission denied</string>
     <string name="toast_no_devices">No USB devices found</string>
     <string name="toast_password_empty">Password cannot be empty</string>
     <string name="toast_native_not_init">Native library not initialized</string>

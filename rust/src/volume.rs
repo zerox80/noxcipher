@@ -578,6 +578,9 @@ const EFFECTIVE_HEADER_SIZE: usize = 512;
 const HEADER_SALT_SIZE: usize = 64;
 const ENCRYPTED_HEADER_SIZE: usize = EFFECTIVE_HEADER_SIZE - HEADER_SALT_SIZE;
 const XTS_KEY_SIZE: usize = 32;
+const PRIMARY_VOLUME_HEADER_AREA_SIZE: u64 = 131072;
+const TOTAL_VOLUME_HEADER_AREA_SIZE: u64 = PRIMARY_VOLUME_HEADER_AREA_SIZE * 2;
+const MIN_FILE_HOSTED_VOLUME_SIZE: u64 = 299008;
 
 fn cipher_component_count(alg: CipherType) -> usize {
     match alg {
@@ -1007,7 +1010,6 @@ pub fn create_volume(
     sector_size_opt: Option<u32>,
 ) -> Result<(), VolumeError> {
     let mut file = OpenOptions::new().write(true).create(true).open(path)?;
-    file.set_len(size)?;
 
     // We can't trust the passed master_key length alone for cascaded ciphers if they are truncated.
     // We expect the caller to provide enough bytes for the chosen cipher.
@@ -1039,13 +1041,32 @@ pub fn create_volume(
         return Err(VolumeError::CryptoError(format!("Invalid sector size: {}", sector_size)));
     }
 
+    if size < MIN_FILE_HOSTED_VOLUME_SIZE {
+        return Err(VolumeError::CryptoError(format!(
+            "Volume too small. Need at least {} bytes for a VeraCrypt-compatible file-hosted volume",
+            MIN_FILE_HOSTED_VOLUME_SIZE
+        )));
+    }
+
+    if size % sector_size as u64 != 0 {
+        return Err(VolumeError::CryptoError(format!(
+            "Volume size {} is not aligned to sector size {}",
+            size,
+            sector_size
+        )));
+    }
+
+    file.set_len(size)?;
+
     // VeraCrypt Layout:
     // Header: 128KB (Offset 0)
     // Data: Size - 256KB
     // Backup Header: 128KB (End)
     
-    let encrypted_area_start = 131072;
-    let encrypted_area_length = size - 262144; // Total size - headers
+    let encrypted_area_start = PRIMARY_VOLUME_HEADER_AREA_SIZE;
+    let encrypted_area_length = size.checked_sub(TOTAL_VOLUME_HEADER_AREA_SIZE).ok_or_else(|| {
+        VolumeError::CryptoError("Volume too small for primary and backup header areas".to_string())
+    })?;
 
     let mut header = VolumeHeader::new(
         5, 0x011a, 
@@ -1080,8 +1101,8 @@ pub fn create_volume(
     file.write_all(&encrypted_header)?;
     
     // Write Backup Header (at End - 128KB)
-    if size >= 131072 {
-        file.seek(SeekFrom::Start(size - 131072))?;
+    if size >= TOTAL_VOLUME_HEADER_AREA_SIZE {
+        file.seek(SeekFrom::Start(size - PRIMARY_VOLUME_HEADER_AREA_SIZE))?;
         file.write_all(&encrypted_header)?;
     }
     

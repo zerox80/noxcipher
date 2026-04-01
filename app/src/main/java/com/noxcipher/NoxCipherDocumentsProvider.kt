@@ -107,7 +107,11 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(requireNotNull(context).getString(R.string.error_volume_not_mounted))
         val file = getFileForDocId(fs, documentId)
 
-        if (mode != "r") {
+        if (file.isDirectory) {
+            throw FileNotFoundException(requireNotNull(context).getString(R.string.error_doc_not_dir, documentId))
+        }
+
+        if (!isReadOnlyMode(mode)) {
             throw FileNotFoundException("Read-only file system")
         }
         
@@ -127,8 +131,12 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
                         val toRead = Math.min(8192L, file.length - offset).toInt()
                         buffer.limit(toRead)
                         file.read(offset, buffer)
-                        os.write(buffer.array(), 0, buffer.position())
-                        offset += buffer.position()
+                        val bytesRead = buffer.position()
+                        if (bytesRead <= 0) {
+                            break
+                        }
+                        os.write(buffer.array(), 0, bytesRead)
+                        offset += bytesRead
                     }
                 }
             } catch (e: Exception) {
@@ -158,18 +166,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
 
     private fun includeFile(result: MatrixCursor, file: UsbFile) {
         val row = result.newRow()
-        
-        // Construct ID
-        // We need full path. UsbFile doesn't always store full path efficiently.
-        // But we can construct it if we assume we are traversing.
-        // Wait, 'file' object doesn't have 'absolutePath'?
-        // We might need to store parent path in recursion or re-construct.
-        // For simple implementation:
-        // If we are listing children of a parent, we know the parent ID.
-        // But here we just have 'file'.
-        // Let's assume we can get path or we use a hack.
-        // Actually, UsbFile usually has a reference to parent.
-        
+
         val docId = getDocIdForFile(file)
         
         row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, docId)
@@ -194,16 +191,14 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     
     private fun getDocIdForFile(file: UsbFile): String {
         if (file.isRoot) return DEFAULT_ROOT_ID
-        // Bug #8 fix: iterative path construction to avoid StackOverflowError on deep directories.
-        val parts = ArrayDeque<String>()
-        var current: UsbFile = file
-        var depth = 0
-        while (!current.isRoot && depth < 50) {
-            parts.addFirst(current.name)
-            current = current.parent ?: break
-            depth++
-        }
-        return DEFAULT_ROOT_ID + "/" + parts.joinToString("/")
+
+        val normalizedPath = file.absolutePath.replace('\\', '/').trim()
+        val relativePath = normalizedPath.removePrefix("/").trim('/')
+        return if (relativePath.isEmpty()) DEFAULT_ROOT_ID else "$DEFAULT_ROOT_ID/$relativePath"
+    }
+
+    private fun isReadOnlyMode(mode: String): Boolean {
+        return mode.contains('r') && mode.none { it == 'w' || it == 'a' || it == 't' }
     }
 
     override fun deleteDocument(documentId: String) {

@@ -45,7 +45,12 @@ class MainActivity : AppCompatActivity() {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_SHORT).show()
 
-                        // Auto-connect if password is available
+                        val password = findViewById<android.widget.EditText>(R.id.etPassword).text
+                        if (!password.isNullOrEmpty()) {
+                            listDevices()
+                        }
+                    } else {
+                        Toast.makeText(context, context.getString(R.string.toast_permission_denied), Toast.LENGTH_SHORT).show()
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {

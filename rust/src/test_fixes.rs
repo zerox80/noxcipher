@@ -79,5 +79,27 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn test_create_volume_rejects_too_small_veracrypt_layout() {
+        let mut path = std::env::temp_dir();
+        path.push("test_create_vol_too_small.hc");
+        let _ = std::fs::remove_file(&path);
+
+        let res = volume::create_volume(
+            path,
+            b"password",
+            0,
+            262144,
+            &[1u8; 64],
+            &[2u8; 64],
+            CipherType::Aes,
+            PrfAlgorithm::Sha512,
+            None,
+        );
+
+        assert!(matches!(res, Err(VolumeError::CryptoError(_))));
+        assert!(!path.exists());
+    }
+
     // test_encrypted_writer_partial_flush moved to volume.rs due to visibility
 }
