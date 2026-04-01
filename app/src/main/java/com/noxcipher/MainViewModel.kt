@@ -144,8 +144,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                             val passwordCandidates = buildPasswordCandidates(password)
 
-                            for ((index, pwd) in passwordCandidates.withIndex()) {
-                                try {
+                            try {
+                                for ((index, pwd) in passwordCandidates.withIndex()) {
                                     if (index > 0) _logs.emit("Trying trimmed password…")
 
                                     val handle = RustNative.init(
@@ -164,7 +164,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         localHandle = handle
                                         break
                                     }
-                                } finally {
+                                }
+                            } finally {
+                                for (pwd in passwordCandidates) {
                                     if (pwd !== password) {
                                         RustNative.clearByteArray(pwd)
                                     }
@@ -185,18 +187,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 val dummyEntry = PartitionTableEntry(0x0C, 0, 0)
                                 FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
                             } catch (e: Exception) {
-                                val callback = object : NativeReadCallback {
-                                    override fun read(offset: Long, buffer: ByteBuffer): Int {
-                                    return try {
-                                        val start = buffer.position()
-                                        physicalDriver.read(offset, buffer)
-                                        buffer.position() - start
-                                    } catch (e: Exception) {
-                                        Log.e("MainViewModel", "Error reading from physical driver", e)
-                                        -1
-                                    }
-                                }
-                                }
+                                val callback = FileSystemReadCallback(veracryptDriver)
 
                                 val fsHandle = RustNative.mountFs(localHandle, callback, volSize)
                                 if (fsHandle > 0) {
@@ -376,6 +367,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         private const val HEADER_GROUP_SIZE = 131072
+    }
+}
+
+class FileSystemReadCallback(private val driver: BlockDeviceDriver) : NativeReadCallback {
+    override fun read(offset: Long, buffer: java.nio.ByteBuffer): Int {
+        return try {
+            val start = buffer.position()
+            driver.read(offset, buffer)
+            buffer.position() - start
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Error reading from physical driver", e)
+            -1
+        }
     }
 }
 

@@ -77,7 +77,12 @@ impl Read for CallbackReader {
             .map_err(|e| {
                 let _ = env.exception_clear(); 
                 io::Error::new(io::ErrorKind::Other, format!("JNI call failed: {}", e))
-            })?;
+            });
+
+        // Delete the local reference to the ByteBuffer to prevent memory leak
+        let _ = env.delete_local_ref(byte_buffer);
+
+        let result = result?;
 
         // Get int result.
         let bytes_read = result.i().map_err(|e| {

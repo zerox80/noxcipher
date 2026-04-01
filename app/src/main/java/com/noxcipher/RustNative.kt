@@ -129,7 +129,7 @@ object RustNative {
      * @param path The path to list (e.g. "/").
      * @return Array of RustFile objects.
      */
-    external fun listFiles(fsHandle: Long, path: String): Array<RustFile>
+    external fun listFiles(fsHandle: Long, path: String): Array<RustFile>?
 
     /**
      * Reads data from a file.

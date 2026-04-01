@@ -116,8 +116,8 @@ class FileBrowserActivity : AppCompatActivity() {
                 
                 file.read(0, buffer) // Reads data from the file into the buffer starting at offset 0
                 
-                val content = ByteArray(lengthToRead) // Creates a ByteArray to hold the read data
                 buffer.flip() // Flips the buffer to prepare it for reading (from buffer to array)
+                val content = ByteArray(buffer.remaining()) // Creates a ByteArray to hold the read data
                 buffer.get(content) // Transfers bytes from the buffer into the content array
                 
                 val isTruncated = file.length > maxReadSize // Checks if the file is larger than the read limit

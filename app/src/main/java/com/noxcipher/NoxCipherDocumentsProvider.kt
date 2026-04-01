@@ -32,16 +32,6 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             DocumentsContract.Root.COLUMN_DOCUMENT_ID,
             DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
         )
-        
-        private object BackgroundHandler {
-            private val handlerThread = android.os.HandlerThread("ContentProviderIO")
-            init {
-                handlerThread.start()
-            }
-            fun getHandler(): android.os.Handler {
-                return android.os.Handler(handlerThread.looper)
-            }
-        }
     }
 
     override fun onCreate(): Boolean {
@@ -126,57 +116,26 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         // Android provides StorageManager.openProxyFileDescriptor but it requires API 26+.
         // Our minSdk is 26, so we are good.
         
-        val storageManager = requireNotNull(context).getSystemService(android.content.Context.STORAGE_SERVICE) as android.os.storage.StorageManager
-        
-        // Use cached thread pool or single thread executor 
-        // For simplicity in this bug fix, use a lazy singleton executor or just cached thread pool.
-        // Creating a new HandlerThread for every file is bad.
-        // We can reuse a global HandlerThread.
-        
-        val handler = BackgroundHandler.getHandler()
-
-        // We need to implement a ProxyFileDescriptorCallback
-        val callback = object : android.os.ProxyFileDescriptorCallback() {
-            override fun onGetSize(): Long {
-                return file.length
-            }
-
-            override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
-                val buffer = java.nio.ByteBuffer.wrap(data)
-                
-                // Ensure we don't read past EOF
-                if (offset >= file.length) return 0
-                
-                val lengthToRead = Math.min(size.toLong(), file.length - offset).toInt()
-                buffer.limit(lengthToRead)
-                
-                try {
-                    file.read(offset, buffer)
-                    return buffer.position()
-                } catch (e: IOException) {
-                    throw android.system.ErrnoException("read", android.system.OsConstants.EIO)
+        val (readFd, writeFd) = ParcelFileDescriptor.createReliablePipe()
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { os ->
+                    val buffer = java.nio.ByteBuffer.allocate(8192)
+                    var offset = 0L
+                    while (offset < file.length) {
+                        buffer.clear()
+                        val toRead = Math.min(8192L, file.length - offset).toInt()
+                        buffer.limit(toRead)
+                        file.read(offset, buffer)
+                        os.write(buffer.array(), 0, buffer.position())
+                        offset += buffer.position()
+                    }
                 }
-            }
-
-            override fun onWrite(offset: Long, size: Int, data: ByteArray): Int {
-                throw android.system.ErrnoException("write", android.system.OsConstants.EPERM)
-            }
-
-            override fun onRelease() {
-                try {
-                    file.flush()
-                } catch (e: IOException) {
-                    // Ignore
-                }
-                // Do NOT quit the shared thread.
+            } catch (e: Exception) {
+                try { writeFd.closeWithError("Read failed") } catch (e2: Exception) {}
             }
         }
-        
-        return storageManager.openProxyFileDescriptor(
-            ParcelFileDescriptor.parseMode(mode),
-            callback,
-            handler
-        )
+        return readFd
     }
     
     private fun getFileForDocId(fs: me.jahnen.libaums.core.fs.FileSystem, docId: String): UsbFile {

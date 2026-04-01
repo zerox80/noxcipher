@@ -64,7 +64,7 @@ class RustUsbFile(
     // List files in this directory.
     override fun listFiles(): Array<UsbFile> {
         // Call native listFiles.
-        val files = RustNative.listFiles(fsHandle, path)
+        val files = RustNative.listFiles(fsHandle, path) ?: emptyArray()
         // Map RustFile objects to RustUsbFile wrappers.
         return files.map { 
             val childPath = if (path == "/") "/${it.name}" else "$path/${it.name}"

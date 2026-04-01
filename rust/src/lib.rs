@@ -176,6 +176,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
             if let Ok(jstr) = env.new_string(log) {
                  // Set the element at index i in the array to the created Java string.
                 let _ = env.set_object_array_element(&array, i as i32, jstr);
+                // Delete local reference
+                let _ = env.delete_local_ref(jstr);
             }
         }
 
@@ -473,6 +475,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         // Copy data from the Java byte array region into the Rust buffer slice.
         if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
+            // zeroize before returning
+            buf.zeroize();
             // If an error occurs, throw a RuntimeException.
             let _ = env.throw_new(
                 "java/lang/RuntimeException",
@@ -484,6 +488,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         // Perform the decryption operation using the volume module.
         if let Err(e) = volume::decrypt(handle, offset_u64, &mut buf) {
+            buf.zeroize();
             // If decryption fails, throw an IOException.
             let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
             // Return early.
@@ -569,6 +574,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
 
         // Copy data from the Java byte array region into the Rust buffer slice.
         if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {
+            buf.zeroize();
             // If an error occurs, throw a RuntimeException.
             let _ = env.throw_new(
                 "java/lang/RuntimeException",
@@ -580,6 +586,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encrypt(
 
         // Perform the encryption operation using the volume module.
         if let Err(e) = volume::encrypt(handle, offset_u64, &mut buf) {
+            buf.zeroize();
             // If encryption fails, throw an IOException.
             let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
             // Return early.
@@ -657,7 +664,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decryptDirect(
 
         // Create slice
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
-        let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+        let target_slice = &mut buf_slice[(position as usize)..((position as usize) + (length as usize))];
 
         if let Err(e) = volume::decrypt(handle, offset_u64, target_slice) {
              let _ = env.throw_new("java/io/IOException", format!("Decrypt failed: {}", e));
@@ -715,7 +722,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encryptDirect(
 
         // Create slice
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
-        let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+        let target_slice = &mut buf_slice[(position as usize)..((position as usize) + (length as usize))];
 
         if let Err(e) = volume::encrypt(handle, offset_u64, target_slice) {
              let _ = env.throw_new("java/io/IOException", format!("Encrypt failed: {}", e));
@@ -1077,7 +1084,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
         // Access the file system.
         if let Ok(lock) = FILESYSTEMS.read() {
              // Look up the file system handle.
-            if let Some(fs_arc) = lock.get(&fs_handle) {
+            if let Some(fs_arc) = lock.get(&fs_handle).cloned() {
+                drop(lock);
                 // Lock the individual filesystem instance
                 if let Ok(mut fs) = fs_arc.lock() {
                      // Convert the raw JByteArray buffer to a JByteArray object unsafely.
@@ -1160,11 +1168,12 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFileDirect(
 
         // Access filesystem
         if let Ok(lock) = FILESYSTEMS.read() {
-            if let Some(fs_arc) = lock.get(&fs_handle) {
+            if let Some(fs_arc) = lock.get(&fs_handle).cloned() {
+                drop(lock);
                 if let Ok(mut fs) = fs_arc.lock() {
                     // Create slice from direct buffer
                     let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
-                    let target_slice = &mut buf_slice[(position as usize)..((position + length) as usize)];
+                    let target_slice = &mut buf_slice[(position as usize)..((position as usize) + (length as usize))];
                     
                     match fs.read_file(&path, offset as u64, target_slice) {
                         Ok(bytes_read) => return bytes_read as jlong,

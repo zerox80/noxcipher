@@ -180,12 +180,15 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val passwordBytes = passwordText.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+            val passwordBytes = ByteArray(passwordText.length)
+            for (i in passwordText.indices) {
+                passwordBytes[i] = passwordText[i].code.toByte()
+            }
+            passwordText.clear()
 
             // Pass null to let ViewModel scan all available devices
             connectDevice(null, passwordBytes, pim)
 
-            passwordText.clear()
             return
         }
 
