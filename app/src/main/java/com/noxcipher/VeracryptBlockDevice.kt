@@ -18,7 +18,7 @@ class VeracryptBlockDevice(
         get() = physicalDevice.blockSize
 
     override val blocks: Long
-        get() = (physicalDevice.blocks * physicalDevice.blockSize - dataOffset) / physicalDevice.blockSize
+        get() = maxOf(0L, (physicalDevice.blocks * physicalDevice.blockSize - dataOffset) / physicalDevice.blockSize)
 
     override fun read(offset: Long, dest: ByteBuffer) {
         // 1. Read encrypted data from physical device
@@ -89,6 +89,7 @@ class VeracryptBlockDevice(
     }
 
     override fun close() {
-        RustNative.close(rustHandle)
+        // Bug #5 fix: rustHandle ownership belongs to MainViewModel, which calls RustNative.close().
+        // Double-freeing here would cause a use-after-free in native code.
     }
 }

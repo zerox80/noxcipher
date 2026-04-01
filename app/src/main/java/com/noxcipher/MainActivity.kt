@@ -24,11 +24,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var usbManager: UsbManager
     private lateinit var tvLog: TextView
-    
+
     companion object {
         private const val ACTION_USB_PERMISSION = "com.noxcipher.USB_PERMISSION"
     }
-    
+
     // Use ViewModel to retain connection across config changes
     private val viewModel: MainViewModel by viewModels()
 
@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_SHORT).show()
-                        
+
                         // Auto-connect if password is available
                     }
                 }
@@ -56,8 +56,8 @@ class MainActivity : AppCompatActivity() {
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     }
                     log("Device detached: ${device?.deviceName}")
-                    // Ideally we should close connection here, but ViewModel handles it on cleared or we can trigger it.
-                    // For now just log.
+                    // Bug #4 fix: close stale handles when USB device is removed
+                    viewModel.closeConnection()
                 }
             }
         }
@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
 
             val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
             val etPim = findViewById<android.widget.EditText>(R.id.etPim)
-            
+
             val editorListener = android.widget.TextView.OnEditorActionListener { _, actionId, _ ->
                 if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
                     listDevices()
@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
                     false
                 }
             }
-            
+
             etPassword.setOnEditorActionListener(editorListener)
             etPim.setOnEditorActionListener(editorListener)
 
@@ -119,7 +119,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            
+
             // Observe Logs
             lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -138,162 +138,7 @@ class MainActivity : AppCompatActivity() {
     private fun listDevices() {
         val deviceList = usbManager.deviceList
         log("Found ${deviceList.size} devices")
-        
-        if (deviceList.isEmpty()) {
-            Toast.makeText(this, getString(R.string.toast_no_devices), Toast.LENGTH_SHORT).show()
-            return
-        }
 
-        // Get password once
-        val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
-        val passwordText = etPassword.text
-        if (passwordText.isNullOrEmpty()) {
-            Toast.makeText(this, getString(R.string.toast_password_empty), Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        // Get PIM
-package com.noxcipher
-
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
-import android.os.Bundle
-import android.util.Log
-import android.widget.Button
-import android.widget.TextView
-import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
-import kotlinx.coroutines.launch
-import androidx.activity.viewModels
-import androidx.core.content.ContextCompat
-
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var usbManager: UsbManager
-    private lateinit var tvLog: TextView
-    
-    companion object {
-        private const val ACTION_USB_PERMISSION = "com.noxcipher.USB_PERMISSION"
-    }
-    
-    // Use ViewModel to retain connection across config changes
-    private val viewModel: MainViewModel by viewModels()
-
-    private val usbReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                ACTION_USB_PERMISSION -> {
-                    val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        Toast.makeText(context, context.getString(R.string.toast_permission_granted), Toast.LENGTH_SHORT).show()
-                        
-                        // Auto-connect if password is available
-                    }
-                }
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
-                    log("Device detached: ${device?.deviceName}")
-                    // Ideally we should close connection here, but ViewModel handles it on cleared or we can trigger it.
-                    // For now just log.
-                }
-            }
-        }
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        log("MainActivity onCreate started")
-        setContentView(R.layout.activity_main)
-
-        try {
-            usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-            tvLog = findViewById(R.id.tvLog)
-            log("Views initialized")
-
-            findViewById<Button>(R.id.btnListDevices).setOnClickListener {
-                listDevices()
-            }
-
-            val etPassword = findViewById<android.widget.EditText>(R.id.etPassword)
-            val etPim = findViewById<android.widget.EditText>(R.id.etPim)
-            
-            val editorListener = android.widget.TextView.OnEditorActionListener { _, actionId, _ ->
-                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
-                    listDevices()
-                    true
-                } else {
-                    false
-                }
-            }
-            
-            etPassword.setOnEditorActionListener(editorListener)
-            etPim.setOnEditorActionListener(editorListener)
-
-            val filter = IntentFilter(ACTION_USB_PERMISSION)
-            filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-            log("Receiver registered")
-
-            // Observe ViewModel results
-            lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.connectionResult.collect { result ->
-                        when (result) {
-                            is ConnectionResult.Success -> {
-                                findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.GONE
-                                setInputsEnabled(true)
-                                log("Unlock successful")
-                                val intent = Intent(this@MainActivity, FileBrowserActivity::class.java)
-                                startActivity(intent)
-                            }
-                            is ConnectionResult.Error -> {
-                                findViewById<android.view.View>(R.id.progressBar).visibility = android.view.View.GONE
-                                setInputsEnabled(true)
-                                log(result.message)
-                                Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Observe Logs
-            lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.logs.collect { logs ->
-                        log(logs)
-                    }
-                }
-            }
-
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error in onCreate", e)
-            Toast.makeText(this, getString(R.string.toast_error_init, e.message), Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun listDevices() {
-        val deviceList = usbManager.deviceList
-        log("Found ${deviceList.size} devices")
-        
         if (deviceList.isEmpty()) {
             Toast.makeText(this, getString(R.string.toast_no_devices), Toast.LENGTH_SHORT).show()
             return
@@ -312,14 +157,12 @@ class MainActivity : AppCompatActivity() {
         val pimText = etPim.text.toString()
         val pim = if (pimText.isEmpty()) 0 else pimText.toIntOrNull() ?: 0
 
-        // Break loop after first successful connection attempt to avoid race condition
-        // Use manual byte conversion to avoid uncleared ByteBuffer
         // Flag to track if we found any potential device
         var permissionRequested = false
-        
+
         for (device in deviceList.values) {
             log("Device: ${device.deviceName} (Vendor: ${device.vendorId}, Product: ${device.productId})")
-            
+
             if (!usbManager.hasPermission(device)) {
                 // Request permission for the first unauthorized device we see, but continue checking others
                 if (!permissionRequested) {
@@ -328,39 +171,26 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        
-        // If we found authorized devices, we triggered connectDevice (currently inside loop).
-        // Let's refactor:
-        // If we have permission for *any*, trigger scan.
-        // We can't easily know WHICH one is the drive without reading it.
-        // So `connectDevice(..., specificDevice=null)` is the correct approach if we want to scan all.
-        // But `listDevices` iterates.
-        
-        // Correct Fix within existing structure (minimal change):
-        // Don't Connect inside loop. Collect authorized devices.
-        // Then Connect.
-        
+
         val authorizedDevices = deviceList.values.filter { usbManager.hasPermission(it) }
-        
+
         if (authorizedDevices.isNotEmpty()) {
-             if (!RustNative.isInitialized) {
+            if (!RustNative.isInitialized) {
                 Toast.makeText(this, getString(R.string.toast_native_not_init), Toast.LENGTH_LONG).show()
                 return
             }
-            
+
             val passwordBytes = passwordText.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
-            
+
             // Pass null to let ViewModel scan all available devices
-            connectDevice(null, passwordBytes, pim) 
-            
+            connectDevice(null, passwordBytes, pim)
+
             passwordText.clear()
             return
         }
 
         if (!permissionRequested && authorizedDevices.isEmpty()) {
-             // If we are here, we looped all devices. None had permission (and none requested?), 
-             // or we requested permission for one.
-             if (!permissionRequested) log("No suitable device connected or permission requested.")
+            if (!permissionRequested) log("No suitable device connected or permission requested.")
         }
     }
 

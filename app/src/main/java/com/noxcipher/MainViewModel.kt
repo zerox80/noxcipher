@@ -1,4 +1,3 @@
-```
 package com.noxcipher
 
 import android.app.Application
@@ -123,7 +122,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val volSize = safeVolumeSize(physicalDriver)
                             if (volSize <= 0) {
                                 lastError = "Unable to determine volume size"
-                                selected.close()
                                 continue
                             }
 
@@ -136,13 +134,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                             if (isAllZeros(headerBytes)) {
                                 lastError = "Skipped: Header is all zeros"
-                                selected.close()
                                 continue
                             }
 
                             if (isCommonFileSystem(headerBytes)) {
                                 lastError = "Skipped: Detected unencrypted filesystem"
-                                selected.close()
                                 continue
                             }
 
@@ -174,13 +170,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                                 }
                             }
-                            // Clear original password bytes
-                            RustNative.clearByteArray(password)
-                            }
 
                             if (localHandle == null || localHandle <= 0) {
                                 lastError = "Invalid password/PIM or not a VeraCrypt volume"
-                                selected.close()
                                 continue
                             }
 
@@ -267,7 +259,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun closeConnection() {
+    fun closeConnection() {
         try {
             SessionManager.activeFileSystem = null
             activeFileSystem?.close()

@@ -57,7 +57,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             row.add(DocumentsContract.Root.COLUMN_ROOT_ID, DEFAULT_ROOT_ID)
             row.add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
             row.add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
-            row.add(DocumentsContract.Root.COLUMN_TITLE, context!!.getString(R.string.root_title))
+            row.add(DocumentsContract.Root.COLUMN_TITLE, requireNotNull(context).getString(R.string.root_title))
             row.add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, DEFAULT_ROOT_ID)
             // row.add(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES, fs.capacity - fs.occupiedSpace) // Optional
         }
@@ -72,7 +72,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     ): Cursor {
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
         
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(requireNotNull(context).getString(R.string.error_volume_not_mounted))
         
         try {
             val parentFile = if (parentDocumentId == DEFAULT_ROOT_ID) {
@@ -82,14 +82,14 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
             }
              
             if (!parentFile.isDirectory) {
-                throw FileNotFoundException(context!!.getString(R.string.error_doc_not_dir, parentDocumentId))
+                throw FileNotFoundException(requireNotNull(context).getString(R.string.error_doc_not_dir, parentDocumentId))
             }
             
             for (file in parentFile.listFiles()) {
                 includeFile(result, file)
             }
         } catch (e: IOException) {
-            throw FileNotFoundException(context!!.getString(R.string.error_list_files, e.message))
+            throw FileNotFoundException(requireNotNull(context).getString(R.string.error_list_files, e.message))
         }
         
         return result
@@ -97,13 +97,13 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(requireNotNull(context).getString(R.string.error_volume_not_mounted))
         
         try {
             val file = getFileForDocId(fs, documentId)
             includeFile(result, file)
         } catch (e: IOException) {
-            throw FileNotFoundException(context!!.getString(R.string.error_file_not_found, documentId))
+            throw FileNotFoundException(requireNotNull(context).getString(R.string.error_file_not_found, documentId))
         }
         
         return result
@@ -114,7 +114,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         mode: String,
         signal: CancellationSignal?
     ): ParcelFileDescriptor {
-        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(context!!.getString(R.string.error_volume_not_mounted))
+        val fs = SessionManager.activeFileSystem ?: throw FileNotFoundException(requireNotNull(context).getString(R.string.error_volume_not_mounted))
         val file = getFileForDocId(fs, documentId)
 
         if (mode != "r") {
@@ -126,7 +126,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         // Android provides StorageManager.openProxyFileDescriptor but it requires API 26+.
         // Our minSdk is 26, so we are good.
         
-        val storageManager = context!!.getSystemService(android.content.Context.STORAGE_SERVICE) as android.os.storage.StorageManager
+        val storageManager = requireNotNull(context).getSystemService(android.content.Context.STORAGE_SERVICE) as android.os.storage.StorageManager
         
         // Use cached thread pool or single thread executor 
         // For simplicity in this bug fix, use a lazy singleton executor or just cached thread pool.
@@ -191,7 +191,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         for (part in parts) {
             if (part == DEFAULT_ROOT_ID) continue
             val children = current.listFiles()
-            current = children.find { it.name == part } ?: throw FileNotFoundException(context!!.getString(R.string.error_file_not_found_in, part, docId))
+            current = children.find { it.name == part } ?: throw FileNotFoundException(requireNotNull(context).getString(R.string.error_file_not_found_in, part, docId))
         }
         
         return current
@@ -235,18 +235,16 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
     
     private fun getDocIdForFile(file: UsbFile): String {
         if (file.isRoot) return DEFAULT_ROOT_ID
-        // RustUsbFile might not implement parent correctly or recursion depth issue?
-        // For now, assume simplified path construction based on file.absolutePath if available or name.
-        // But Libaums UsbFile contract relies on parent.
-        // Safety check.
-        val parent = file.parent
-        return if (parent == null || parent.isRoot) {
-            // Parent is root or null (treated as root child)
-            "$DEFAULT_ROOT_ID/${file.name}"
-        } else {
-             // Safe recursion (hope no cycles)
-             "${getDocIdForFile(parent)}/${file.name}"
+        // Bug #8 fix: iterative path construction to avoid StackOverflowError on deep directories.
+        val parts = ArrayDeque<String>()
+        var current: UsbFile = file
+        var depth = 0
+        while (!current.isRoot && depth < 50) {
+            parts.addFirst(current.name)
+            current = current.parent ?: break
+            depth++
         }
+        return DEFAULT_ROOT_ID + "/" + parts.joinToString("/")
     }
 
     override fun deleteDocument(documentId: String) {

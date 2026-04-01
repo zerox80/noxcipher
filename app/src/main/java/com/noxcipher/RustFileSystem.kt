@@ -18,12 +18,17 @@ class RustFileSystem(
     override val volumeLabel: String
         get() = label
 
-    // Capacity metrics (placeholders as we don't query them from Rust yet).
-    override val capacity: Long = 0 
-    override val occupiedSpace: Long = 0 
-    override val freeSpace: Long = 0 
+    // Bug #10 fix: report a non-zero capacity so the system doesn't refuse file operations.
+    // Real values require a RustNative.getFsStats() JNI call (not yet implemented).
+    override val capacity: Long = Long.MAX_VALUE / 2
+    override val occupiedSpace: Long = 0
+    override val freeSpace: Long = Long.MAX_VALUE / 2
     override val chunkSize: Int = 512
     override val type: Int = 0 // Changed from String to Int to match interface
+
+    override fun close() {
+        RustNative.closeFs(fsHandle)
+    }
 }
 
 // Implementation of libaums UsbFile interface backed by Rust native code.
@@ -116,7 +121,8 @@ class RustUsbFile(
     
     override fun flush() {}
     override fun close() {
-        RustNative.closeFs(fsHandle)
+        // Bug #6 fix: individual file close must NOT close the entire filesystem handle.
+        // RustFileSystem.close() (the FileSystem itself) is the correct owner of fsHandle.
     }
     // Write operations gracefully fail or do nothing since we disabled flags.
     override fun createDirectory(name: String): UsbFile { throw IOException("Read-only") }

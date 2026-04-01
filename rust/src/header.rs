@@ -208,8 +208,6 @@ impl VolumeHeader {
 
         // Read the flags (4 bytes) from offset 60.
         let flags = BigEndian::read_u32(&decrypted[60..64]);
-        // Read the sector size (4 bytes) from offset 64.
-        let mut sector_size = BigEndian::read_u32(&decrypted[64..68]);
         // For versions older than 5, the sector size is fixed at 512 bytes.
         // However, if the read sector size is 0 or invalid (e.g. from a fresh init), we might want to default it.
         // But if it was read as something else, we should probably respect it or fail?
@@ -469,5 +467,32 @@ mod tests {
 
         assert_ne!(header.crc32, 0);
         assert_ne!(header.key_area_crc32, 0);
+    }
+
+    #[test]
+    fn test_deserialize_version_4_forces_legacy_sector_size() {
+        let mut header = VolumeHeader::new(
+            4,
+            0x0100,
+            0,
+            0,
+            0,
+            1024 * 1024,
+            131072,
+            1024 * 1024,
+            0,
+            512,
+            [7u8; 256],
+            [9u8; 64],
+            0,
+        ).unwrap();
+
+        let mut serialized = header.serialize().unwrap();
+        BigEndian::write_u32(&mut serialized[128..132], 4096);
+
+        let parsed = VolumeHeader::deserialize(&serialized[64..512], &serialized[..64], 0)
+            .expect("Failed to deserialize version 4 header");
+
+        assert_eq!(parsed.sector_size, 512);
     }
 }
