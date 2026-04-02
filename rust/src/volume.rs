@@ -97,6 +97,7 @@ pub enum PrfAlgorithm {
     Streebog, // 512
     Blake2s, // 256
     Sha1, // Legacy
+    Argon2id,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -866,7 +867,7 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
             
             if let Ok(_) = self.inner.read_exact(&mut first_sector) {
                  // Decrypt first_sector
-                 let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
+                 let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Tweak calculate overflow"))?;
                  let sector_tweak_start = (abs_tweak_offset / 512) + start_sector * (self.sector_size / 512);
                  for i in 0..(self.sector_size / 512) {
                      let tweak = sector_tweak_start + i;
@@ -893,20 +894,19 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
              let read_pos = self.data_start_offset + (last_sector_idx * self.sector_size);
              self.inner.seek(SeekFrom::Start(read_pos))?;
              
-             if let Ok(_) = self.inner.read_exact(&mut last_sector) {
-                 // Decrypt last_sector
-                 let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
-                 let sector_tweak_start = (abs_tweak_offset / 512) + last_sector_idx * (self.sector_size / 512);
-                 for i in 0..(self.sector_size / 512) {
-                     let tweak = sector_tweak_start + i;
-                     let unit_off = (i * 512) as usize;
-                     self.cipher.decrypt_area(&mut last_sector[unit_off..unit_off+512], 512, tweak);
-                 }
-                 
-                 self.buffer.extend_from_slice(&last_sector[rem..]);
-             } else {
-                 self.buffer.resize(self.buffer.len() + padding_needed, 0);
+             self.inner.read_exact(&mut last_sector)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to read tail padding"))?;
+
+             // Decrypt last_sector
+             let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Tweak calculate overflow"))?;
+             let sector_tweak_start = (abs_tweak_offset / 512) + last_sector_idx * (self.sector_size / 512);
+             for i in 0..(self.sector_size / 512) {
+                 let tweak = sector_tweak_start + i;
+                 let unit_off = (i * 512) as usize;
+                 self.cipher.decrypt_area(&mut last_sector[unit_off..unit_off+512], 512, tweak);
              }
+             
+             self.buffer.extend_from_slice(&last_sector[rem..]);
         }
         
         // Now buffer is aligned to sector boundaries and starts at start_sector
@@ -917,7 +917,7 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
 
         for sector_data in chunks.by_ref() {
              // Encrypt using correct tweak
-             let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
+             let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Tweak calculate overflow"))?;
              let sector_tweak_start = (abs_tweak_offset / 512) + (idx * units_per_sector);
              
              for i in 0..units_per_sector {
@@ -983,11 +983,30 @@ impl<'a, W: Read + Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
 
 // Helper to derive key (generic)
 fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], prf: PrfAlgorithm) {
+    if prf == PrfAlgorithm::Argon2id {
+        let pim_val = if pim <= 0 { 12 } else { pim };
+        let t_cost = if pim_val <= 31 {
+            3 + ((pim_val - 1) / 3) as u32
+        } else {
+            13 + (pim_val - 31) as u32
+        };
+        let m_cost_mib = core::cmp::min(64 + (pim_val - 1) * 32, 1024) as u32;
+        let m_cost_kib = m_cost_mib * 1024;
+        
+        // Parallelism = 1
+        if let Ok(params) = argon2::Params::new(m_cost_kib, t_cost, 1, Some(key.len())) {
+            let a2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            a2.hash_password_into(password, salt, key).ok();
+        }
+        return;
+    }
+
     let iter = if pim > 0 {
          // TrueCrypt legacy algorithms do not support PIM multipliers, fallback to their fixed counts.
          match prf {
              PrfAlgorithm::Ripemd160 => 655331, // Standard VC fallback
              PrfAlgorithm::Sha1 => 2000,
+             PrfAlgorithm::Sha256 | PrfAlgorithm::Blake2s | PrfAlgorithm::Streebog => 15000 + (pim as u32) * 2048,
              _ => 15000 + (pim as u32) * 1000,
          }
     } else {
@@ -1000,6 +1019,7 @@ fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], pr
             PrfAlgorithm::Whirlpool => 500_000,
             PrfAlgorithm::Streebog => 500_000,
             PrfAlgorithm::Blake2s => 500_000,
+            PrfAlgorithm::Argon2id => unreachable!(),
         }
     };
 
@@ -1011,6 +1031,7 @@ fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], pr
         PrfAlgorithm::Streebog => { pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, key).ok(); },
         PrfAlgorithm::Blake2s => { pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, key).ok(); },
         PrfAlgorithm::Sha1 => { pbkdf2::<Hmac<Sha1>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Argon2id => unreachable!(),
     }
 }
 
@@ -1462,6 +1483,18 @@ fn try_header_at_offset(
                 return Ok(vol);
             },
             _ => {}
+        }
+
+        // 8. Argon2id (Try only on the first iteration count because its parameters only depend on PIM)
+        if idx == 0 {
+            derive_key_generic(password, salt, pim, &mut *header_key, PrfAlgorithm::Argon2id);
+            match try_unlock(&*header_key, PrfAlgorithm::Argon2id, &mut last_debug) {
+                Ok(vol) => {
+                    header_key.zeroize();
+                    return Ok(vol);
+                },
+                _ => {}
+            }
         }
 
         // Zeroize the header key after use.

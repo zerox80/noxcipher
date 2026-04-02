@@ -203,14 +203,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     continue
                                 }
 
-                                headerPlan as HeaderPlan.Attempt
-                                headerPlan.recoveryReason?.let {
+                                val attemptPlan = headerPlan as? HeaderPlan.Attempt ?: continue
+                                attemptPlan.recoveryReason?.let {
                                     _logs.emit("$candidateLabel: $it")
                                 }
 
                                 localHandle = openVolume(
                                     candidate = candidate,
-                                    headerPlan = headerPlan,
+                                    headerPlan = attemptPlan,
                                     password = password,
                                     pim = pim,
                                     protectionPassword = protectionPassword,

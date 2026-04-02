@@ -30,11 +30,17 @@ class FileBrowserActivity : AppCompatActivity() {
         // Handle back press using OnBackPressedDispatcher
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                val current = currentDir
                 // Checks if the current directory is not null and is not the root directory
-                if (currentDir != null && !currentDir!!.isRoot) {
+                if (current != null && !current.isRoot) {
                     // Go up one level in the directory hierarchy
-                    currentDir = currentDir!!.parent // Sets currentDir to its parent directory
-                    loadFiles() // Reloads the file list for the new current directory
+                    val parent = current.parent // Sets currentDir to its parent directory
+                    if (parent != null) {
+                        currentDir = parent
+                        loadFiles() // Reloads the file list for the new current directory
+                    } else {
+                        finish()
+                    }
                 } else {
                     finish() // If at root or null, close activity
                 }
@@ -194,4 +200,9 @@ class FileBrowserActivity : AppCompatActivity() {
             .show() // Shows the dialog
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Prevent Session Leak when activity is destroyed (e.g. rotation or back press)
+        SessionManager.activeFileSystem = null
+    }
 }

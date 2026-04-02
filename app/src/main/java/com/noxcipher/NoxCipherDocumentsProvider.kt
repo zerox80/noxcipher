@@ -121,28 +121,36 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         // Our minSdk is 26, so we are good.
         
         val (readFd, writeFd) = ParcelFileDescriptor.createReliablePipe()
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            try {
-                ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { os ->
-                    val buffer = java.nio.ByteBuffer.allocate(8192)
-                    var offset = 0L
-                    while (offset < file.length) {
-                        buffer.clear()
-                        val toRead = Math.min(8192L, file.length - offset).toInt()
-                        buffer.limit(toRead)
-                        file.read(offset, buffer)
-                        val bytesRead = buffer.position()
-                        if (bytesRead <= 0) {
-                            break
+
+        try {
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                try {
+                    ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { os ->
+                        val buffer = java.nio.ByteBuffer.allocate(8192)
+                        var offset = 0L
+                        while (offset < file.length) {
+                            buffer.clear()
+                            val toRead = Math.min(8192L, file.length - offset).toInt()
+                            buffer.limit(toRead)
+                            file.read(offset, buffer)
+                            val bytesRead = buffer.position()
+                            if (bytesRead <= 0) {
+                                break
+                            }
+                            os.write(buffer.array(), 0, bytesRead)
+                            offset += bytesRead
                         }
-                        os.write(buffer.array(), 0, bytesRead)
-                        offset += bytesRead
                     }
+                } catch (e: Exception) {
+                    try { writeFd.closeWithError("Read failed: " + e.message) } catch (e2: Exception) {}
                 }
-            } catch (e: Exception) {
-                try { writeFd.closeWithError("Read failed") } catch (e2: Exception) {}
             }
+        } catch (e: Exception) {
+            try { readFd.close() } catch (ignored: Exception) {}
+            try { writeFd.close() } catch (ignored: Exception) {}
+            throw FileNotFoundException("Open failed: ${e.message}")
         }
+        
         return readFd
     }
     

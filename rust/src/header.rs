@@ -250,7 +250,7 @@ impl VolumeHeader {
         }
 
         // Initialize a 256-byte array for the master key data, filled with zeros.
-        let mut master_key_data = [0u8; 256];
+        let mut master_key_data = zeroize::Zeroizing::new([0u8; 256]);
         // Copy the key area data from the decrypted buffer (offset 192 to 448) into the array.
         master_key_data.copy_from_slice(&decrypted[192..448]);
 
@@ -271,7 +271,7 @@ impl VolumeHeader {
             flags,
             sector_size,
             key_area_crc32,
-            master_key_data,
+            master_key_data: *master_key_data, // Deref Zeroizing box back to array inside zeroized struct
             salt: salt_arr,
             pim,
         })

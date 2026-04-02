@@ -148,25 +148,38 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
         };
 
         // Find the java.lang.String class in the JVM.
-        // Expect success, otherwise panic with a message.
-        let string_class = env
-            .find_class("java/lang/String")
-            .unwrap_or_else(|_| {
-                 // Fallback? If we can't find String, we can't do much.
-                 panic!("Could not find String class");
-            });
-            
+        let string_class = match env.find_class("java/lang/String") {
+            Ok(class) => class,
+            Err(e) => {
+                log::error!("Failed to find String class: {}", e);
+                return std::ptr::null_mut();
+            }
+        };
+
         // Create a new empty Java string to use as an initial element/template.
-        // Expect success.
-        let empty_string = env.new_string("").unwrap_or_else(|_| panic!("Could not create empty string"));
+        let empty_string = match env.new_string("") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to create empty string: {}", e);
+                let _ = env.delete_local_ref(string_class);
+                return std::ptr::null_mut();
+            }
+        };
 
         // Create a new object array of Strings with the size of the logs vector.
-        // Expect success.
-        let array = env
-            .new_object_array(logs.len() as i32, string_class, empty_string)
-            .unwrap_or(JObject::null().into()); // use JObject::null() which is compatible with jobjectArray return (in wrapper)
-            
+        let array = match env.new_object_array(logs.len() as i32, string_class, empty_string) {
+            Ok(arr) => arr,
+            Err(e) => {
+                log::error!("Failed to create object array: {}", e);
+                let _ = env.delete_local_ref(empty_string);
+                let _ = env.delete_local_ref(string_class);
+                return std::ptr::null_mut();
+            }
+        };
+
         if array.is_null() {
+            let _ = env.delete_local_ref(empty_string);
+            let _ = env.delete_local_ref(string_class);
             return std::ptr::null_mut();
         }
 
@@ -176,10 +189,14 @@ pub extern "system" fn Java_com_noxcipher_RustNative_getLogs(
             if let Ok(jstr) = env.new_string(log) {
                  // Set the element at index i in the array to the created Java string.
                 let _ = env.set_object_array_element(&array, i as i32, jstr);
-                // Delete local reference
+                // Delete local reference to prevent leak
                 let _ = env.delete_local_ref(jstr);
             }
         }
+
+        // Cleanup local refs used as templates
+        let _ = env.delete_local_ref(empty_string);
+        let _ = env.delete_local_ref(string_class);
 
         // Return the raw pointer to the Java object array.
         array.into_raw()
@@ -466,10 +483,28 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
             }
         };
 
+        if len < 0 {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid array length");
+            return;
+        }
+
         // Allocate a Rust vector of zeros with the same length.
         let mut buf = vec![0u8; len as usize];
         // Get a mutable pointer to the buffer and cast it to i8 (signed byte for JNI).
         let buf_ptr = buf.as_mut_ptr() as *mut i8;
+        if buf_ptr.is_null() {
+            let _ = env.throw_new("java/lang/RuntimeException", "Allocation failed, null pointer");
+            return;
+        }
+
+        // Allocate a Rust vector of zeros with the same length.
+        let mut buf = vec![0u8; len as usize];
+        // Get a mutable pointer to the buffer and cast it to i8 (signed byte for JNI).
+        let buf_ptr = buf.as_mut_ptr() as *mut i8;
+        if buf_ptr.is_null() {
+            let _ = env.throw_new("java/lang/RuntimeException", "Allocation failed, null pointer");
+            return;
+        }
         // Create a mutable slice from the raw parts.
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len as usize) };
 
@@ -662,6 +697,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decryptDirect(
             }
         };
 
+        if buf_ptr.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Buffer pointer is null");
+             return;
+        }
+
         // Create slice
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
         let target_slice = &mut buf_slice[(position as usize)..((position as usize) + (length as usize))];
@@ -719,6 +759,11 @@ pub extern "system" fn Java_com_noxcipher_RustNative_encryptDirect(
                  return;
             }
         };
+
+        if buf_ptr.is_null() {
+             let _ = env.throw_new("java/lang/IllegalArgumentException", "Buffer pointer is null");
+             return;
+        }
 
         // Create slice
         let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, capacity) };
@@ -1216,6 +1261,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFileDirect(
              Err(_) => return -1,
         };
 
+        if buf_ptr.is_null() { return -1; }
+
         if position < 0 || length < 0 || (position as usize + length as usize) > capacity {
              return -1;
         }
@@ -1307,6 +1354,7 @@ fn int_to_prf(val: i32) -> Option<volume::PrfAlgorithm> {
         4 => Some(volume::PrfAlgorithm::Streebog),
         5 => Some(volume::PrfAlgorithm::Blake2s),
         6 => Some(volume::PrfAlgorithm::Sha1),
+        7 => Some(volume::PrfAlgorithm::Argon2id),
         _ => None,
     }
 }
