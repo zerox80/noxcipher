@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
                     log("Device detached: ${device?.deviceName}")
                     // Bug #4 fix: close stale handles when USB device is removed
                     viewModel.closeConnection()
+                    SessionManager.activeFileSystem = null
                 }
             }
         }
@@ -188,8 +189,8 @@ class MainActivity : AppCompatActivity() {
             val passwordBytes = ByteArray(passwordText.length)
             for (i in passwordText.indices) {
                 passwordBytes[i] = passwordText[i].code.toByte()
-                passwordText.replace(i, i + 1, "0")
             }
+            passwordText.replace(0, passwordText.length, "".padStart(passwordText.length, '0'))
             passwordText.clear()
 
             // Pass null to let ViewModel scan all available devices

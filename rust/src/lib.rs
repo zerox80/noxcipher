@@ -1130,6 +1130,60 @@ pub extern "system" fn Java_com_noxcipher_RustNative_readFile(
     }
 }
 
+// Define a JNI function named Java_com_noxcipher_RustNative_readFileArray.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "system" fn Java_com_noxcipher_RustNative_readFileArray(
+    mut env: JNIEnv,
+    _class: JClass,
+    fs_handle: jlong,
+    path_obj: jni::objects::JString,
+    offset: jlong,
+    buffer: jbyteArray,
+    array_offset: jni::sys::jint,
+    length: jni::sys::jint,
+) -> jlong {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path: String = match env.get_string(&path_obj) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+
+        if let Ok(lock) = FILESYSTEMS.read() {
+            if let Some(fs_arc) = lock.get(&fs_handle).cloned() {
+                drop(lock);
+                if let Ok(mut fs) = fs_arc.lock() {
+                    let mut buf = vec![0u8; length as usize];
+                    let res = match fs.read_file(&path, offset as u64, &mut buf) {
+                        Ok(bytes_read) => {
+                            let buf_ptr = buf.as_ptr() as *const i8;
+                            let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes_read) };
+                            let buf_obj = unsafe { JByteArray::from_raw(buffer) };
+                            if let Err(e) = env.set_byte_array_region(&buf_obj, array_offset, buf_slice) {
+                                log::error!("Failed to set byte array region: {}", e);
+                                -1
+                            } else {
+                                bytes_read as jlong
+                            }
+                        }
+                        Err(_) => -1,
+                    };
+                    return res;
+                }
+            }
+        }
+        -1
+    }));
+
+    match result {
+        Ok(val) => val,
+        Err(_) => {
+            log::error!("Panic in readFileArray");
+            -1
+        }
+    }
+}
+
 // Define a JNI function named Java_com_noxcipher_RustNative_readFileDirect.
 // It reads content from a file in the mounted file system directly into a ByteBuffer.
 #[no_mangle]

@@ -141,6 +141,7 @@ object RustNative {
      */
     external fun readFile(fsHandle: Long, path: String, offset: Long, buffer: ByteArray): Long
     external fun readFileDirect(fsHandle: Long, path: String, offset: Long, buffer: java.nio.ByteBuffer, position: Int, length: Int): Long
+    external fun readFileArray(fsHandle: Long, path: String, offset: Long, array: ByteArray, arrayOffset: Int, length: Int): Long
 
     /**
      * Closes the file system.

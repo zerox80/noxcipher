@@ -92,13 +92,12 @@ class RustUsbFile(
 
         // Optimization: Use backing array if directly accessible and safe
         if (destination.hasArray() && !destination.isReadOnly) {
-            // We can't use readFile(ByteArray) directly because it writes from index 0.
-            // But we can check if we can pass a large enough buffer or valid logic.
-            // Since RustNative.readFile uses GetByteArrayRegion/SetByteArrayRegion, 
-            // we can read into a temp buffer and copy, OR we need a JNI API that supports offset/len for arrays.
-            // Without changing JNI signature for array: stick to temp buffer for array-backed but
-            // maybe we can reuse a thread-local buffer if high frequency?
-            // For now, simple allocation is safer than incorrect unsafe JNI access.
+            val array = destination.array()
+            val arrayOffset = destination.arrayOffset() + destination.position()
+            val read = RustNative.readFileArray(fsHandle, path, offset, array, arrayOffset, len)
+            if (read < 0) throw IOException("Native read failed")
+            if (read > 0) destination.position(destination.position() + read.toInt())
+            return
         }
         
         // Allocate temporary buffer (fallback)

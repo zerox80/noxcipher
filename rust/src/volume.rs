@@ -1192,135 +1192,155 @@ fn try_header_at_offset(
         let hv_opt = hidden_volume_offset.or(if offset == 0 { None } else { Some(offset) });
 
         // Try AES
-        match try_cipher::<Aes256>(
-            key,
-            encrypted_header,
-            partition_start_offset, hv_opt,
-            offset, // Header offset
-            salt,
-            pim,
-            Some(prf),
-            |k1, k2| {
-                SupportedCipher::Aes(Xts128::new(AesWrapper::new(k1.into()), AesWrapper::new(k2.into())))
-            },
-        ) {
-            Ok(v) => return Ok(v),
-            Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            Err(e) => return Err(e), // Propagate other errors (e.g. CryptoError)
+        if !has_vulnerable_xts_key_material(&key[..64], CipherType::Aes) {
+            match try_cipher::<Aes256>(
+                key,
+                encrypted_header,
+                partition_start_offset, hv_opt,
+                offset, // Header offset
+                salt,
+                pim,
+                Some(prf),
+                |k1, k2| {
+                    SupportedCipher::Aes(Xts128::new(AesWrapper::new(k1.into()), AesWrapper::new(k2.into())))
+                },
+            ) {
+                Ok(v) => return Ok(v),
+                Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
+                Err(e) => return Err(e), // Propagate other errors (e.g. CryptoError)
+            }
         }
 
         // Try Serpent
-        match try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
-            Ok(v) => return Ok(v),
-            Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            Err(e) => return Err(e), // Propagate other errors
+        if !has_vulnerable_xts_key_material(&key[..64], CipherType::Serpent) {
+            match try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                Ok(v) => return Ok(v),
+                Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
+                Err(e) => return Err(e), // Propagate other errors
+            }
         }
 
         // Try Twofish
-        match try_cipher::<TwofishWrapper>(
-            key,
-            encrypted_header,
-            partition_start_offset, hv_opt,
-            offset,
-            salt,
-            pim,
-            Some(prf),
-            |k1, k2| {
-                SupportedCipher::Twofish(Xts128::new(
-                    TwofishWrapper::new(k1.into()),
-                    TwofishWrapper::new(k2.into()),
-                ))
-            },
-        ) {
-            Ok(v) => return Ok(v),
-            Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            Err(e) => return Err(e),
+        if !has_vulnerable_xts_key_material(&key[..64], CipherType::Twofish) {
+            match try_cipher::<TwofishWrapper>(
+                key,
+                encrypted_header,
+                partition_start_offset, hv_opt,
+                offset,
+                salt,
+                pim,
+                Some(prf),
+                |k1, k2| {
+                    SupportedCipher::Twofish(Xts128::new(
+                        TwofishWrapper::new(k1.into()),
+                        TwofishWrapper::new(k2.into()),
+                    ))
+                },
+            ) {
+                Ok(v) => return Ok(v),
+                Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
+                Err(e) => return Err(e),
+            }
         }
 
         // Try Camellia
-        match try_cipher_camellia(
-            key,
-            encrypted_header,
-            partition_start_offset, hv_opt,
-            offset,
-            salt,
-            pim,
-            Some(prf),
-            ) {
-            Ok(v) => return Ok(v),
-            Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            _ => {}
+        if !has_vulnerable_xts_key_material(&key[..64], CipherType::Camellia) {
+            match try_cipher_camellia(
+                key,
+                encrypted_header,
+                partition_start_offset, hv_opt,
+                offset,
+                salt,
+                pim,
+                Some(prf),
+                ) {
+                Ok(v) => return Ok(v),
+                Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
+                _ => {}
+            }
         }
 
         // Try Kuznyechik
-        match try_cipher_kuznyechik(
-            key,
-            encrypted_header,
-            partition_start_offset, hv_opt,
-            offset,
-            salt,
-            pim,
-            Some(prf),
-            ) {
-            Ok(v) => return Ok(v),
-            Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
-            _ => {}
+        if !has_vulnerable_xts_key_material(&key[..64], CipherType::Kuznyechik) {
+            match try_cipher_kuznyechik(
+                key,
+                encrypted_header,
+                partition_start_offset, hv_opt,
+                offset,
+                salt,
+                pim,
+                Some(prf),
+                ) {
+                Ok(v) => return Ok(v),
+                Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
+                _ => {}
+            }
         }
         
         // Cascades
-        if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::AesTwofish) {
+            if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
-        if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..192], CipherType::AesTwofishSerpent) {
+            if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
-        if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::SerpentAes) {
+            if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
-        if let Ok(v) = try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::TwofishSerpent) {
+            if let Ok(v) = try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
         // Try Serpent-Twofish-AES
-        if let Ok(v) =
-            try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf))
-        {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..192], CipherType::SerpentTwofishAes) {
+            if let Ok(v) = try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
         // Try Camellia-Kuznyechik
-        if let Ok(v) =
-            try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf))
-        {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::CamelliaKuznyechik) {
+            if let Ok(v) = try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
         // Try Camellia-Serpent
-        if let Ok(v) =
-            try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf))
-        {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::CamelliaSerpent) {
+            if let Ok(v) = try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
         // Try Kuznyechik-AES
-        if let Ok(v) =
-            try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf))
-        {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::KuznyechikAes) {
+            if let Ok(v) = try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
         // Try Kuznyechik-Serpent-Camellia
-        if let Ok(v) = try_cipher_kuznyechik_serpent_camellia(
-            key,
-            encrypted_header,
-            partition_start_offset, hv_opt,
-            offset,
-            salt,
-            pim,
-            Some(prf),
-        ) {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..192], CipherType::KuznyechikSerpentCamellia) {
+            if let Ok(v) = try_cipher_kuznyechik_serpent_camellia(
+                key,
+                encrypted_header,
+                partition_start_offset, hv_opt,
+                offset,
+                salt,
+                pim,
+                Some(prf),
+            ) {
+                return Ok(v);
+            }
         }
         // Try Kuznyechik-Twofish
-        if let Ok(v) =
-            try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf))
-        {
-            return Ok(v);
+        if !has_vulnerable_xts_key_material(&key[..128], CipherType::KuznyechikTwofish) {
+            if let Ok(v) = try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+                return Ok(v);
+            }
         }
 
         // Return InvalidPassword if none work.
@@ -1395,41 +1415,24 @@ fn try_header_at_offset(
 
         // 6. RIPEMD-160
         // Calculate specific iteration count for RIPEMD-160.
-        let ripemd_iter = if pim > 0 {
-            // For RIPEMD-160, PIM formula is same as others.
-            // Use checked arithmetic to prevent overflow. Return error if overflow.
-            let iter = 15000u64.checked_add((pim as u64).checked_mul(1000).ok_or(VolumeError::CryptoError("PIM RIPEMD overflow".to_string()))?)
-                .ok_or(VolumeError::CryptoError("PIM RIPEMD overflow".to_string()))?;
-            if iter > u32::MAX as u64 { 
-                return Err(VolumeError::CryptoError("PIM iterations (RIPEMD) too large".to_string())); 
-            } else { 
-                iter as u32 
-            }
+        // Map standard iteration counts to RIPEMD specific ones.
+        let ripemd_iter = if iter == 500_000 {
+            655_331
+        } else if iter == 200_000 {
+            327_661
         } else {
-            // Map standard iteration counts to RIPEMD specific ones.
-            if iter == 500_000 {
-                655_331
-            } else if iter == 200_000 {
-                327_661
-            } else {
-                iter
-            }
+            iter
         };
 
-        // Optimized: Only run RIPEMD if not redundant (when pim > 0, ripemd_iter is constant)
-        let run_ripemd = if pim > 0 { iter == iterations_list[0] } else { true };
-
-        if run_ripemd {
-            // Derive key using PBKDF2-HMAC-Ripemd160.
-            pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut *header_key).ok();
-            // Try to unlock.
-            match try_unlock(&*header_key, PrfAlgorithm::Ripemd160, &mut last_debug) {
-                Ok(vol) => {
-                    header_key.zeroize();
-                    return Ok(vol);
-                },
-                _ => {}
-            }
+        // Derive key using PBKDF2-HMAC-Ripemd160.
+        pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut *header_key).ok();
+        // Try to unlock.
+        match try_unlock(&*header_key, PrfAlgorithm::Ripemd160, &mut last_debug) {
+            Ok(vol) => {
+                header_key.zeroize();
+                return Ok(vol);
+            },
+            _ => {}
         }
 
         // 7. SHA-1 (Legacy)
