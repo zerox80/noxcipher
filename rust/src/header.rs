@@ -205,6 +205,18 @@ impl VolumeHeader {
         if encrypted_area_start.checked_add(encrypted_area_length).is_none() {
              return Err(HeaderError::InvalidLayout); // Reusing generic invalid error
         }
+        
+        // Ensure encrypted_area_start is strictly 512-byte aligned
+        if encrypted_area_start % 512 != 0 {
+             return Err(HeaderError::InvalidLayout);
+        }
+        
+        // Validate hidden volume bounds
+        if hidden_volume_size > 0 {
+             if encrypted_area_start.checked_add(hidden_volume_size).is_none() || hidden_volume_size > volume_data_size {
+                 return Err(HeaderError::InvalidLayout);
+             }
+        }
 
         // Read the flags (4 bytes) from offset 60.
         let flags = BigEndian::read_u32(&decrypted[60..64]);
@@ -216,10 +228,11 @@ impl VolumeHeader {
         // But if it was read as something else, we should probably respect it or fail?
         // VeraCrypt implementation forces 512 for < 5.
         
-        let mut sector_size = if version >= 5 {
+        let sector_size = if version >= 5 {
             // Version 5+: Sector size is at offset 64
              let s = BigEndian::read_u32(&decrypted[64..68]);
-             if s == 0 { 512 } else { s }
+             if s == 0 { return Err(HeaderError::InvalidSectorSize(0)); }
+             s
         } else {
              // Version < 5: Strictly 512 bytes
              512
@@ -286,14 +299,11 @@ impl VolumeHeader {
         // Return true if Key1 is identical to Key2.
         // Return true if Key1 is identical to Key2.
         // Use constant-time comparison to prevent timing attacks.
+        use subtle::ConstantTimeEq;
         if key1.len() != key2.len() {
             return false;
         }
-        let mut diff = 0u8;
-        for (a, b) in key1.iter().zip(key2.iter()) {
-            diff |= a ^ b;
-        }
-        diff == 0
+        bool::from(key1.ct_eq(key2))
     }
 
     // Constructor for creating a new VolumeHeader.

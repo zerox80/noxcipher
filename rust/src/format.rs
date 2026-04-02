@@ -149,7 +149,7 @@ pub fn format_fat32<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     // FAT32 Extended Fields
     // Sectors Per FAT 32
     LittleEndian::write_u32(&mut boot_sector[36..40], geometry.fat_sectors);
-    // Ext Flags (0 - Mirror active)
+    // Ext Flags (0 - Mirror active, bit 7 = 0)
     LittleEndian::write_u16(&mut boot_sector[40..42], 0);
     // FS Version (0.0)
     LittleEndian::write_u16(&mut boot_sector[42..44], 0);
@@ -157,7 +157,7 @@ pub fn format_fat32<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     LittleEndian::write_u32(&mut boot_sector[44..48], 2);
     // FS Info Sector (1)
     LittleEndian::write_u16(&mut boot_sector[48..50], 1);
-    // Backup Boot Sector (6)
+    // Backup Boot Sector (6) ensuring it doesn't overlap anywhere
     LittleEndian::write_u16(&mut boot_sector[50..52], 6);
     
     // Drive Number (0x80)

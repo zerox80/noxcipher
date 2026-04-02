@@ -460,7 +460,7 @@ pub fn create_context(
                             // Protected Range Start = header_offset_bias + hidden_vol.header.encrypted_area_start
                             // Protected Range End = Protected Range Start + hidden_vol.header.volume_data_size
                             
-                            let start = header_offset_bias.checked_add(hidden_vol.header.encrypted_area_start)
+                            let start = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
                                 .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
                             
                             let end = start.checked_add(hidden_vol.header.volume_data_size)
@@ -698,12 +698,8 @@ fn has_vulnerable_xts_key_material(key: &[u8], alg: CipherType) -> bool {
         let primary = &key[primary_start..primary_start + XTS_KEY_SIZE];
         let secondary = &key[secondary_start..secondary_start + XTS_KEY_SIZE];
 
-        let mut diff = 0u8;
-        for (left, right) in primary.iter().zip(secondary.iter()) {
-            diff |= left ^ right;
-        }
-
-        if diff == 0 {
+        use subtle::ConstantTimeEq;
+        if bool::from(primary.ct_eq(secondary)) {
             return true;
         }
     }
@@ -833,17 +829,19 @@ struct EncryptedVolumeWriter<'a, W: Read + Write + Seek> {
     cipher: SupportedCipher,
     sector_size: u64,
     data_start_offset: u64,
+    partition_start_offset: u64,
     current_pos: u64,
     buffer: Vec<u8>,
 }
 
 impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
-    fn new(inner: &'a mut W, cipher: SupportedCipher, sector_size: u64, data_start: u64) -> Self {
+    fn new(inner: &'a mut W, cipher: SupportedCipher, sector_size: u64, data_start: u64, partition_start: u64) -> Self {
         Self {
             inner,
             cipher,
             sector_size,
             data_start_offset: data_start,
+            partition_start_offset: partition_start,
             current_pos: 0,
             buffer: Vec::new(),
         }
@@ -861,37 +859,50 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
 
         // 1. Handle Head Alignment (Prefix)
         if start_offset != 0 {
-            // We need to read the prefix of the sector from disk to align the buffer start
-            let prefix_len = start_offset;
-            let mut prefix = vec![0u8; prefix_len];
-            
+            let mut first_sector = vec![0u8; self.sector_size as usize];
             let read_pos = self.data_start_offset + (start_sector * self.sector_size);
             self.inner.seek(SeekFrom::Start(read_pos))?;
             
-            // Attempt to read prefix.
-            if let Err(e) = self.inner.read_exact(&mut prefix) {
-                 // Propagate error to avoid data corruption
-                 return Err(e);
+            if let Ok(_) = self.inner.read_exact(&mut first_sector) {
+                 // Decrypt first_sector
+                 let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
+                 let sector_tweak_start = (abs_tweak_offset / 512) + start_sector * (self.sector_size / 512);
+                 for i in 0..(self.sector_size / 512) {
+                     let tweak = sector_tweak_start + i;
+                     let unit_off = (i * 512) as usize;
+                     self.cipher.decrypt_area(&mut first_sector[unit_off..unit_off+512], 512, tweak);
+                 }
+                 
+                 let prefix = first_sector[0..start_offset].to_vec();
+                 let mut new_buf = prefix;
+                 new_buf.extend_from_slice(&self.buffer);
+                 self.buffer = new_buf;
+            } else {
+                 return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to read head padding"));
             }
-
-            // Prepend prefix to buffer
-            let mut new_buf = prefix;
-            new_buf.extend_from_slice(&self.buffer);
-            self.buffer = new_buf;
         }
         
         // 2. Handle Tail Alignment (Suffix)
         let rem = self.buffer.len() % (self.sector_size as usize);
         if rem != 0 {
+             let last_sector_idx = start_sector + (self.buffer.len() as u64 / self.sector_size);
              let padding_needed = (self.sector_size as usize) - rem;
-             let mut suffix = vec![0u8; padding_needed];
              
-             // Calculate read position for suffix: Disk Start + Buffer Len (which includes prefix now)
-             let read_pos = self.data_start_offset + (start_sector * self.sector_size) + self.buffer.len() as u64;
+             let mut last_sector = vec![0u8; self.sector_size as usize];
+             let read_pos = self.data_start_offset + (last_sector_idx * self.sector_size);
              self.inner.seek(SeekFrom::Start(read_pos))?;
              
-             if let Ok(_) = self.inner.read_exact(&mut suffix) {
-                 self.buffer.extend_from_slice(&suffix);
+             if let Ok(_) = self.inner.read_exact(&mut last_sector) {
+                 // Decrypt last_sector
+                 let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
+                 let sector_tweak_start = (abs_tweak_offset / 512) + last_sector_idx * (self.sector_size / 512);
+                 for i in 0..(self.sector_size / 512) {
+                     let tweak = sector_tweak_start + i;
+                     let unit_off = (i * 512) as usize;
+                     self.cipher.decrypt_area(&mut last_sector[unit_off..unit_off+512], 512, tweak);
+                 }
+                 
+                 self.buffer.extend_from_slice(&last_sector[rem..]);
              } else {
                  self.buffer.resize(self.buffer.len() + padding_needed, 0);
              }
@@ -905,7 +916,8 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
 
         for sector_data in chunks.by_ref() {
              // Encrypt using correct tweak
-             let sector_tweak_start = (self.data_start_offset / 512) + (idx * units_per_sector);
+             let abs_tweak_offset = self.partition_start_offset.checked_add(self.data_start_offset).unwrap_or(0);
+             let sector_tweak_start = (abs_tweak_offset / 512) + (idx * units_per_sector);
              
              for i in 0..units_per_sector {
                  let unit_off = (i * 512) as usize;
@@ -971,9 +983,12 @@ impl<'a, W: Read + Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
 // Helper to derive key (generic)
 fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], prf: PrfAlgorithm) {
     let iter = if pim > 0 {
-         // Standard: 15000 + (pim * 1000)
-         // Note: RIPEMD-160 usually follows the same formula if PIM > 0
-         15000 + (pim as u32) * 1000
+         // TrueCrypt legacy algorithms do not support PIM multipliers, fallback to their fixed counts.
+         match prf {
+             PrfAlgorithm::Ripemd160 => 655331, // Standard VC fallback
+             PrfAlgorithm::Sha1 => 2000,
+             _ => 15000 + (pim as u32) * 1000,
+         }
     } else {
         // Defaults
         match prf {
@@ -1109,7 +1124,8 @@ pub fn create_volume(
     // Format Filesystem (FAT32)
     // We need Volume Cipher (Using Master Key)
     let volume_cipher = create_cipher(cipher_type, &mk_arr[..required_key_size])?;
-    let mut writer = EncryptedVolumeWriter::new(&mut file, volume_cipher, 512, encrypted_area_start);
+    let mut writer = EncryptedVolumeWriter::new(&mut file, volume_cipher, 512, encrypted_area_start, 0); // partition_start_offset is 0 for purely created volumes
+
     
     use crate::format::format_fat32;
     format_fat32(&mut writer, encrypted_area_length).map_err(|e| VolumeError::IoError(e))?;
