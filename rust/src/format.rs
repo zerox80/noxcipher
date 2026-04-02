@@ -220,9 +220,10 @@ pub fn format_fat32<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     writer.seek(SeekFrom::Start(geometry.fat1_offset))?;
     writer.write_all(&fat_start)?;
     
-    // Zero out the rest of FAT1
+    // Zero out the rest of FAT1 (padding to full FAT sectors)
     let zeros = vec![0u8; 4096];
-    let mut remaining = geometry.fat_size_bytes.saturating_sub(fat_start.len() as u64);
+    let fat_sector_bytes = geometry.fat_sectors as u64 * SECTOR_SIZE;
+    let mut remaining = fat_sector_bytes.saturating_sub(fat_start.len() as u64);
     while remaining > 0 {
         let to_write = std::cmp::min(remaining, zeros.len() as u64);
         writer.write_all(&zeros[..to_write as usize])?;
@@ -234,7 +235,7 @@ pub fn format_fat32<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     writer.write_all(&fat_start)?;
     
     // Zero out the rest of FAT2
-    let mut remaining = geometry.fat_size_bytes.saturating_sub(fat_start.len() as u64);
+    let mut remaining = fat_sector_bytes.saturating_sub(fat_start.len() as u64);
     while remaining > 0 {
         let to_write = std::cmp::min(remaining, zeros.len() as u64);
         writer.write_all(&zeros[..to_write as usize])?;

@@ -739,17 +739,17 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
             Ok(SupportedCipher::Twofish(Xts128::new(TwofishWrapper::new(key_1.into()), TwofishWrapper::new(key_2.into()))))
         },
         CipherType::AesTwofish => {
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::AesTwofish(
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::AesTwofishSerpent => {
-             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::AesTwofishSerpent(
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into())),
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
@@ -757,25 +757,25 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
              ))
         },
         CipherType::SerpentAes => {
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::SerpentAes(
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::TwofishSerpent => {
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::TwofishSerpent(
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into()))
             ))
         },
         CipherType::SerpentTwofishAes => {
-             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::SerpentTwofishAes(
                  Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
                  Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
@@ -791,33 +791,33 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
             Ok(SupportedCipher::Kuznyechik(Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()))))
         },
         CipherType::CamelliaKuznyechik => {
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::CamelliaKuznyechik(
                 Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into())),
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()))
             ))
         },
         CipherType::CamelliaSerpent => {
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::CamelliaSerpent(
                 Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into())),
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into()))
             ))
         },
         CipherType::KuznyechikAes => {
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::KuznyechikAes(
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::KuznyechikSerpentCamellia => {
-             let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::KuznyechikSerpentCamellia(
                  Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                  Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
@@ -825,8 +825,8 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
              ))
         },
         CipherType::KuznyechikTwofish => {
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::KuznyechikTwofish(
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into()))
@@ -1016,13 +1016,7 @@ fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], pr
     }
 
     let iter = if pim > 0 {
-         // TrueCrypt legacy algorithms do not support PIM multipliers, fallback to their fixed counts.
-         match prf {
-             PrfAlgorithm::Ripemd160 => 655331, // Standard VC fallback
-             PrfAlgorithm::Sha1 => 2000,
-             PrfAlgorithm::Sha256 | PrfAlgorithm::Blake2s | PrfAlgorithm::Streebog => 15000 + (pim as u32) * 2048,
-             _ => 15000 + (pim as u32) * 1000,
-         }
+        15000 + (pim as u32) * 1000
     } else {
         // Defaults
         match prf {

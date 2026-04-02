@@ -216,13 +216,6 @@ impl VolumeHeader {
         if encrypted_area_start % 512 != 0 {
              return Err(HeaderError::InvalidLayout);
         }
-        
-        // Validate hidden volume bounds
-        if hidden_volume_size > 0 {
-             if encrypted_area_start.checked_add(hidden_volume_size).is_none() || hidden_volume_size > volume_data_size {
-                 return Err(HeaderError::InvalidLayout);
-             }
-        }
 
         // Read the flags (4 bytes) from offset 60.
         let flags = BigEndian::read_u32(&decrypted[60..64]);

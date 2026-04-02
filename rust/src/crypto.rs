@@ -469,44 +469,31 @@ impl SupportedCipher {
             // For single Twofish, call decrypt_area.
             SupportedCipher::Twofish(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
 
-            // For AesTwofish cascade:
             SupportedCipher::AesTwofish(xts_twofish, xts_aes) => {
-                // First decrypt with AES.
-                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
-                // Then decrypt with Twofish.
                 xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For AesTwofishSerpent cascade:
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                // Decrypt with AES.
-                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Twofish.
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Serpent.
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For SerpentAes cascade:
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                // Decrypt with Serpent.
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with AES.
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For TwofishSerpent cascade:
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                // Decrypt with Twofish.
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Serpent.
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For SerpentTwofishAes cascade:
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                // Decrypt with Serpent.
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Twofish.
-                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with AES.
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For single Camellia:
             SupportedCipher::Camellia(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
@@ -514,24 +501,18 @@ impl SupportedCipher {
             SupportedCipher::Kuznyechik(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
             // For CamelliaKuznyechik cascade:
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                // Decrypt with Camellia.
-                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Kuznyechik.
                 xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For CamelliaSerpent cascade:
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                // Decrypt with Camellia.
-                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Serpent.
                 xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikAes cascade:
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                // Decrypt with Kuznyechik.
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with AES.
                 xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikSerpentCamellia cascade:
             SupportedCipher::KuznyechikSerpentCamellia(
@@ -539,19 +520,14 @@ impl SupportedCipher {
                 xts_serpent,
                 xts_camellia,
             ) => {
-                // Decrypt with Kuznyechik.
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Serpent.
-                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Camellia.
                 xts_camellia.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikTwofish cascade:
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                // Decrypt with Kuznyechik.
-                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
-                // Decrypt with Twofish.
                 xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.decrypt_area(data, sector_size, 0, get_tweak);
             }
         }
     }
@@ -581,42 +557,30 @@ impl SupportedCipher {
 
             // For AesTwofish cascade (Decrypt: AES -> Twofish):
             SupportedCipher::AesTwofish(xts_twofish, xts_aes) => {
-                // Encrypt with Twofish first.
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
-                // Then encrypt with AES.
                 xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For AesTwofishSerpent cascade (Decrypt: Aes -> Twofish -> Serpent):
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
-                // Encrypt with Serpent.
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Twofish.
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with AES.
                 xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For SerpentAes cascade (Decrypt: Serpent -> Aes):
             SupportedCipher::SerpentAes(xts_serpent, xts_aes) => {
-                // Encrypt with AES.
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Serpent.
                 xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For TwofishSerpent cascade (Decrypt: Twofish -> Serpent):
             SupportedCipher::TwofishSerpent(xts_twofish, xts_serpent) => {
-                // Encrypt with Serpent.
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Twofish.
                 xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For SerpentTwofishAes cascade (Decrypt: Serpent -> Twofish -> Aes):
             SupportedCipher::SerpentTwofishAes(xts_serpent, xts_twofish, xts_aes) => {
-                // Encrypt with AES.
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Twofish.
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Serpent.
                 xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For single Camellia:
             SupportedCipher::Camellia(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
@@ -624,24 +588,18 @@ impl SupportedCipher {
             SupportedCipher::Kuznyechik(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
             // For CamelliaKuznyechik cascade (Decrypt: Camellia -> Kuznyechik):
             SupportedCipher::CamelliaKuznyechik(xts_camellia, xts_kuznyechik) => {
-                // Encrypt with Kuznyechik.
-                xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Camellia.
                 xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For CamelliaSerpent cascade (Decrypt: Camellia -> Serpent):
             SupportedCipher::CamelliaSerpent(xts_camellia, xts_serpent) => {
-                // Encrypt with Serpent.
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Camellia.
                 xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikAes cascade (Decrypt: Kuznyechik -> Aes):
             SupportedCipher::KuznyechikAes(xts_kuznyechik, xts_aes) => {
-                // Encrypt with AES.
-                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Kuznyechik.
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikSerpentCamellia cascade (Decrypt: Kuznyechik -> Serpent -> Camellia):
             SupportedCipher::KuznyechikSerpentCamellia(
@@ -649,19 +607,14 @@ impl SupportedCipher {
                 xts_serpent,
                 xts_camellia,
             ) => {
-                // Encrypt with Camellia.
-                xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Serpent.
-                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Kuznyechik.
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_serpent.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_camellia.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For KuznyechikTwofish cascade (Decrypt: Kuznyechik -> Twofish):
             SupportedCipher::KuznyechikTwofish(xts_kuznyechik, xts_twofish) => {
-                // Encrypt with Twofish.
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
-                // Encrypt with Kuznyechik.
                 xts_kuznyechik.encrypt_area(data, sector_size, 0, get_tweak);
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
             }
         }
     }
