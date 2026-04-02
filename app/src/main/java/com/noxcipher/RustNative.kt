@@ -176,7 +176,8 @@ object RustNative {
      * @param volumeSize The size of the volume in bytes.
      * @param salt The 64 byte salt.
      * @param masterKey The 256 byte master key.
-     * @return 0 on success, -1 on failure.
+     * @param filesystemTypeId The filesystem type: 0 = FAT32, 1 = ExFAT.
+     * @return 0 on success, negative on failure.
      */
     external fun formatVolume(
         path: String,
@@ -186,7 +187,8 @@ object RustNative {
         salt: ByteArray,
         masterKey: ByteArray,
         cipherTypeId: Int,
-        prfId: Int
+        prfId: Int,
+        filesystemTypeId: Int = 0
     ): Int
 
     /**

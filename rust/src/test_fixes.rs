@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests {
     use crate::header::{VolumeHeader, HeaderError};
-    use crate::volume::{self, VolumeError, Volume, CipherType, PrfAlgorithm};
+    use crate::volume::{self, VolumeError, Volume, CipherType, PrfAlgorithm, FilesystemType};
     use crate::crypto::SupportedCipher;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -71,7 +71,8 @@ mod tests {
             &master_key,
             CipherType::Aes,
             PrfAlgorithm::Sha512,
-            None
+            None,
+            FilesystemType::Fat32,
         );
         assert!(res.is_ok());
         
@@ -95,6 +96,7 @@ mod tests {
             CipherType::Aes,
             PrfAlgorithm::Sha512,
             None,
+            FilesystemType::Fat32,
         );
 
         assert!(matches!(res, Err(VolumeError::CryptoError(_))));

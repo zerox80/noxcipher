@@ -18,6 +18,7 @@ mod volume;
 // Declare the crypto module, which likely contains cryptographic primitives and operations.
 mod crypto;
 mod format;
+mod format_exfat;
 // Declare the header module, which likely handles parsing and processing of volume headers.
 mod header;
 // Declare the io_callback module, which likely provides mechanisms for I/O callbacks.
@@ -1371,6 +1372,7 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
     master_key: jbyteArray,
     cipher_type_int: jni::sys::jint,
     prf_int: jni::sys::jint,
+    filesystem_type_int: jni::sys::jint,
 ) -> jni::sys::jint {
     let res = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Convert path
@@ -1402,8 +1404,14 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
              Some(p) => p,
              None => return -4, // Invalid PRF
         };
+
+        let filesystem_type = match filesystem_type_int {
+            0 => volume::FilesystemType::Fat32,
+            1 => volume::FilesystemType::ExFat,
+            _ => return -6, // Invalid filesystem type
+        };
         
-        // Call create_volume_file
+        // Call create_volume
         match volume::create_volume(
             &path_str,
             &password_bytes,
@@ -1413,7 +1421,8 @@ pub extern "system" fn Java_com_noxcipher_RustNative_formatVolume(
             &master_key_bytes,
             cipher_type,
             prf,
-            None // default sector size
+            None, // default sector size
+            filesystem_type,
         ) {
             Ok(_) => 0, // Success
             Err(e) => {

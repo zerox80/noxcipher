@@ -10,6 +10,9 @@ import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import java.io.FileNotFoundException
 import java.io.IOException
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class NoxCipherDocumentsProvider : DocumentsProvider() {
 

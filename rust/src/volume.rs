@@ -119,6 +119,12 @@ pub enum CipherType {
     KuznyechikTwofish,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemType {
+    Fat32,
+    ExFat,
+}
+
 // Define the Volume struct representing a mounted volume.
 // Derive Zeroize and ZeroizeOnDrop to securely clear sensitive data.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -259,11 +265,13 @@ impl Volume {
                 let sector_offset = current_sector.checked_mul(sector_size as u64)
                     .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
                 
-                let abs_offset = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
-                    .and_then(|sum| sum.checked_add(sector_offset))
-                    .ok_or(VolumeError::CryptoError("Absolute offset overflow".to_string()))?;
+                // VeraCrypt data unit bounds start at 0 relative to the encrypted payload
+                // Exception is ONLY full system encryption which uses absolute physical sectors
+                let payload_offset = self.partition_start_offset
+                    .checked_add(sector_offset)
+                    .ok_or(VolumeError::CryptoError("Payload offset overflow".to_string()))?;
                 
-                let start_unit_no = abs_offset / 512;
+                let start_unit_no = payload_offset / 512;
                 let unit_no = start_unit_no.checked_add(i as u64)
                     .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
 
@@ -365,11 +373,11 @@ impl Volume {
                 let sector_offset = current_sector.checked_mul(sector_size as u64)
                     .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
 
-                let abs_offset = self.partition_start_offset.checked_add(self.header.encrypted_area_start)
-                    .and_then(|sum| sum.checked_add(sector_offset))
-                    .ok_or(VolumeError::CryptoError("Absolute offset overflow".to_string()))?;
+                let payload_offset = self.partition_start_offset
+                    .checked_add(sector_offset)
+                    .ok_or(VolumeError::CryptoError("Payload offset overflow".to_string()))?;
 
-                let start_unit_no = abs_offset / 512;
+                let start_unit_no = payload_offset / 512;
                 let unit_no = start_unit_no.checked_add(i as u64)
                     .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
 
@@ -426,7 +434,7 @@ pub fn create_context(
         password,
         header_bytes,
         pim,
-        header_offset_bias + 0u64, // Use absolute offset
+        0, header_offset_bias + 0u64, // buffer_offset, header_offset
         partition_start_offset,
         None,
     ) {
@@ -440,7 +448,7 @@ pub fn create_context(
                         prot_pass,
                         header_bytes,
                         protection_pim,
-                        header_offset_bias + 65536u64, // Absolute offset
+                        65536, header_offset_bias + 65536u64, // buffer_offset, header_offset
                         partition_start_offset,
                         None,
                     ) {
@@ -458,10 +466,10 @@ pub fn create_context(
                             // The code below was: offset 65536 + size. This assumes data starts at 65536, which is WRONG.
                             
                             // Correct logic:
-                            // Protected Range Start = header_offset_bias + hidden_vol.header.encrypted_area_start
+                            // Protected Range Start = partition_start_offset + hidden_vol.header.encrypted_area_start
                             // Protected Range End = Protected Range Start + hidden_vol.header.volume_data_size
                             
-                            let start = header_offset_bias.checked_add(hidden_vol.header.encrypted_area_start)
+                            let start = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
                                 .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
                             
                             let end = start.checked_add(hidden_vol.header.volume_data_size)
@@ -494,7 +502,7 @@ pub fn create_context(
             password,
             header_bytes,
             pim,
-            header_offset_bias + 65536u64, // Absolute offset
+            65536, header_offset_bias + 65536u64, // buffer_offset, header_offset
             partition_start_offset,
             None,
         ) {
@@ -535,7 +543,7 @@ pub fn create_context(
                  // If I use `try_header_at_offset` with `bh` and offset 0, it should work for backup header
                  // because the tweak 0 is hardcoded in `try_cipher` variants (seen in `try_cipher_serpent` etc).
                  
-                 match try_header_at_offset(password, bh, pim, 0u64, partition_start_offset, None) {
+                 match try_header_at_offset(password, bh, pim, 0, 0u64, partition_start_offset, None) {
                      Ok(mut vol) => {
                          log::info!("Mounted Backup Header");
                          vol.used_backup_header = true;
@@ -558,7 +566,7 @@ pub fn create_context(
                     password, 
                     header_bytes, 
                     pim, 
-                    backup_offset, // Now passing u64
+                    backup_offset as usize, backup_offset, // buffer_offset, header_offset
                     partition_start_offset,
                     None
                 ) {
@@ -711,6 +719,10 @@ fn has_vulnerable_xts_key_material(key: &[u8], alg: CipherType) -> bool {
 
 // Helper to create a SupportedCipher instance from keys and type
 fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeError> {
+     if has_vulnerable_xts_key_material(key, alg) {
+         return Err(VolumeError::CryptoError("Vulnerable XTS key material detected".into()));
+     }
+
      let component_count = cipher_component_count(alg);
 
      match alg {
@@ -730,8 +742,8 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
             let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::AesTwofish(
-                Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into())),
-                Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into()))
+                Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
+                Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::AesTwofishSerpent => {
@@ -934,14 +946,16 @@ impl<'a, W: Read + Write + Seek> EncryptedVolumeWriter<'a, W> {
         
         // Write to inner at aligned position
         let write_pos = self.data_start_offset + (start_sector * self.sector_size);
-        self.inner.seek(SeekFrom::Start(write_pos))?;
-        self.inner.write_all(&self.buffer)?;
         
-        // Restore position
-        self.inner.seek(SeekFrom::Start(old_pos))?;
+        let write_result = (|| -> std::io::Result<()> {
+            self.inner.seek(SeekFrom::Start(write_pos))?;
+            self.inner.write_all(&self.buffer)?;
+            self.inner.seek(SeekFrom::Start(old_pos))?;
+            Ok(())
+        })();
         
         self.buffer.clear();
-        Ok(())
+        write_result
     }
 }
 
@@ -1045,6 +1059,7 @@ pub fn create_volume(
     cipher_type: CipherType,
     prf: PrfAlgorithm,
     sector_size_opt: Option<u32>,
+    filesystem_type: FilesystemType,
 ) -> Result<(), VolumeError> {
     let mut file = OpenOptions::new().write(true).create(true).open(path)?;
 
@@ -1143,14 +1158,21 @@ pub fn create_volume(
         file.write_all(&encrypted_header)?;
     }
     
-    // Format Filesystem (FAT32)
+    // Format Filesystem
     // We need Volume Cipher (Using Master Key)
     let volume_cipher = create_cipher(cipher_type, &mk_arr[..required_key_size])?;
     let mut writer = EncryptedVolumeWriter::new(&mut file, volume_cipher, 512, encrypted_area_start, 0); // partition_start_offset is 0 for purely created volumes
 
-    
-    use crate::format::format_fat32;
-    format_fat32(&mut writer, encrypted_area_length).map_err(|e| VolumeError::IoError(e))?;
+    match filesystem_type {
+        FilesystemType::Fat32 => {
+            use crate::format::format_fat32;
+            format_fat32(&mut writer, encrypted_area_length).map_err(|e| VolumeError::IoError(e))?;
+        }
+        FilesystemType::ExFat => {
+            use crate::format_exfat::format_exfat;
+            format_exfat(&mut writer, encrypted_area_length).map_err(|e| VolumeError::IoError(e))?;
+        }
+    }
     
     // Ensure everything is written
     writer.flush()?;
@@ -1163,21 +1185,19 @@ fn try_header_at_offset(
     password: &[u8],
     full_buffer: &[u8],
     pim: i32,
-    offset: u64,
+    buffer_offset: usize,
+    header_offset: u64,
     partition_start_offset: u64,
     hidden_volume_offset: Option<u64>,
 ) -> Result<Volume, VolumeError> {
         // Check if buffer has enough data for the header with overflow protection.
-        let offset_usize = usize::try_from(offset)
-            .map_err(|_| VolumeError::CryptoError("Offset too large for architecture".to_string()))?;
-            
-        if offset_usize.checked_add(512).map_or(true, |end| full_buffer.len() < end) {
+        if buffer_offset.checked_add(512).map_or(true, |end| full_buffer.len() < end) {
             // Return InvalidMagic if too short.
             return Err(VolumeError::InvalidHeader(HeaderError::InvalidMagic));
         }
     
         // Extract the header slice.
-        let header_slice = &full_buffer[offset_usize..offset_usize + 512];
+        let header_slice = &full_buffer[buffer_offset..buffer_offset + 512];
         // Extract salt (first 64 bytes).
         let salt = &header_slice[..64];
         // Extract encrypted header data (remaining 448 bytes).
@@ -1227,7 +1247,7 @@ fn try_header_at_offset(
     // Helper closure to try all supported ciphers with a derived key.
     // Captures last_debug to report specific errors (e.g. Magic mismatch)
     let mut try_unlock = |key: &[u8], prf: PrfAlgorithm, last_debug: &mut String| -> Result<Volume, VolumeError> {
-        let hv_opt = hidden_volume_offset.or(if offset == 0 { None } else { Some(offset) });
+        let hv_opt = hidden_volume_offset.or(if header_offset == 0 { None } else { Some(header_offset) });
 
         // Try AES
         if !has_vulnerable_xts_key_material(&key[..64], CipherType::Aes) {
@@ -1235,7 +1255,7 @@ fn try_header_at_offset(
                 key,
                 encrypted_header,
                 partition_start_offset, hv_opt,
-                offset, // Header offset
+                header_offset, // Header offset
                 salt,
                 pim,
                 Some(prf),
@@ -1251,7 +1271,7 @@ fn try_header_at_offset(
 
         // Try Serpent
         if !has_vulnerable_xts_key_material(&key[..64], CipherType::Serpent) {
-            match try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            match try_cipher_serpent(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 Ok(v) => return Ok(v),
                 Err(VolumeError::InvalidPassword(msg)) => *last_debug = msg,
                 Err(e) => return Err(e), // Propagate other errors
@@ -1264,7 +1284,7 @@ fn try_header_at_offset(
                 key,
                 encrypted_header,
                 partition_start_offset, hv_opt,
-                offset,
+                header_offset,
                 salt,
                 pim,
                 Some(prf),
@@ -1287,7 +1307,7 @@ fn try_header_at_offset(
                 key,
                 encrypted_header,
                 partition_start_offset, hv_opt,
-                offset,
+                header_offset,
                 salt,
                 pim,
                 Some(prf),
@@ -1304,7 +1324,7 @@ fn try_header_at_offset(
                 key,
                 encrypted_header,
                 partition_start_offset, hv_opt,
-                offset,
+                header_offset,
                 salt,
                 pim,
                 Some(prf),
@@ -1317,46 +1337,46 @@ fn try_header_at_offset(
         
         // Cascades
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::AesTwofish) {
-            if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_aes_twofish(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         if !has_vulnerable_xts_key_material(&key[..192], CipherType::AesTwofishSerpent) {
-            if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_aes_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::SerpentAes) {
-            if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_serpent_aes(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::TwofishSerpent) {
-            if let Ok(v) = try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_twofish_serpent(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         // Try Serpent-Twofish-AES
         if !has_vulnerable_xts_key_material(&key[..192], CipherType::SerpentTwofishAes) {
-            if let Ok(v) = try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_serpent_twofish_aes(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         // Try Camellia-Kuznyechik
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::CamelliaKuznyechik) {
-            if let Ok(v) = try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_camellia_kuznyechik(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         // Try Camellia-Serpent
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::CamelliaSerpent) {
-            if let Ok(v) = try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_camellia_serpent(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
         // Try Kuznyechik-AES
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::KuznyechikAes) {
-            if let Ok(v) = try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_kuznyechik_aes(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
@@ -1366,7 +1386,7 @@ fn try_header_at_offset(
                 key,
                 encrypted_header,
                 partition_start_offset, hv_opt,
-                offset,
+                header_offset,
                 salt,
                 pim,
                 Some(prf),
@@ -1376,7 +1396,7 @@ fn try_header_at_offset(
         }
         // Try Kuznyechik-Twofish
         if !has_vulnerable_xts_key_material(&key[..128], CipherType::KuznyechikTwofish) {
-            if let Ok(v) = try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_opt, offset, salt, pim, Some(prf)) {
+            if let Ok(v) = try_cipher_kuznyechik_twofish(key, encrypted_header, partition_start_offset, hv_opt, header_offset, salt, pim, Some(prf)) {
                 return Ok(v);
             }
         }
@@ -2564,11 +2584,11 @@ pub fn change_password(
     let _read_len = file.read(&mut buffer).map_err(|e| VolumeError::IoError(e))?;
     
     // Try primary at 0
-    let mut volume = try_header_at_offset(old_password, &buffer, old_pim, 0, 0, None)
+    let mut volume = try_header_at_offset(old_password, &buffer, old_pim, 0, 0, 0, None)
          .or_else(|_| {
              // Maybe Hidden Volume at 64KB?
              if buffer.len() >= 65536 + 512 {
-                 try_header_at_offset(old_password, &buffer, old_pim, 65536, 0, None)
+                 try_header_at_offset(old_password, &buffer, old_pim, 65536, 65536, 0, None)
              } else {
                  Err(VolumeError::InvalidPassword("Buffer too small".into()))
              }
@@ -2580,7 +2600,7 @@ pub fn change_password(
                  file.seek(SeekFrom::Start(offset)).map_err(|e| VolumeError::IoError(e))?;
                  let mut buf = vec![0u8; 512];
                  file.read_exact(&mut buf).map_err(|e| VolumeError::IoError(e))?;
-                 try_header_at_offset(old_password, &buf, old_pim, offset, 0, None)
+                 try_header_at_offset(old_password, &buf, old_pim, 0, offset, 0, None)
              } else {
                  Err(VolumeError::InvalidPassword("Failed to decrypt header".to_string()))
              }

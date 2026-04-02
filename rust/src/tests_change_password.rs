@@ -1,7 +1,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::volume::{create_volume, change_password, create_context, CipherType, PrfAlgorithm, close_context};
+    use crate::volume::{create_volume, change_password, create_context, CipherType, PrfAlgorithm, FilesystemType, close_context};
     use std::fs;
     use std::path::Path;
     use std::io::{Write, Seek, SeekFrom};
@@ -45,7 +45,8 @@ mod tests {
             &MASTER_KEY, 
             CipherType::Aes, 
             PrfAlgorithm::Sha512,
-            None
+            None,
+            FilesystemType::Fat32,
         ).expect("Failed to create volume");
 
         // 2. Change Password
@@ -133,6 +134,7 @@ mod tests {
             CipherType::Twofish,
             PrfAlgorithm::Sha512,
             None,
+            FilesystemType::Fat32,
         ).expect("Failed to create Twofish volume");
 
         let file_content = fs::read(TEST_VOL_TWOFISH).expect("Failed to read Twofish volume");
@@ -177,6 +179,7 @@ mod tests {
             CipherType::AesTwofish,
             PrfAlgorithm::Sha512,
             None,
+            FilesystemType::Fat32,
         ).expect("Failed to create AES-Twofish volume");
 
         change_password(

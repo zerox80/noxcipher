@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"c:\\\\Daten2\\\\VeraCrypt\")"
+    ]
+  }
+}
