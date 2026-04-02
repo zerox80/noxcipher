@@ -156,7 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val candidateDevices = if (specificDevice != null) {
                         devices.filter { it.usbDevice == specificDevice }
                     } else {
-                        devices
+                        devices.toList()
                     }
 
                     if (candidateDevices.isEmpty()) {
@@ -352,7 +352,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun closeConnection() {
         try {
             SessionManager.activeFileSystem = null
-            activeFileSystem?.close()
             activeFileSystem = null
 
             rustHandle?.let { RustNative.close(it) }

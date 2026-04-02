@@ -25,10 +25,6 @@ class RustFileSystem(
     override val freeSpace: Long = Long.MAX_VALUE / 2
     override val chunkSize: Int = 512
     override val type: Int = 0 // Changed from String to Int to match interface
-
-    override fun close() {
-        RustNative.closeFs(fsHandle)
-    }
 }
 
 // Implementation of libaums UsbFile interface backed by Rust native code.

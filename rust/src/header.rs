@@ -142,17 +142,17 @@ impl VolumeHeader {
 
         // Extract the first 4 bytes to check the magic signature.
         let magic = &decrypted[0..4];
-        // Verify if the magic bytes match "VERA" (VeraCrypt) or "TRUE" (TrueCrypt).
-        if magic != b"VERA" && magic != b"TRUE" {
+        // Verify if the magic bytes match "VERA" (VeraCrypt).
+        if magic != b"VERA" {
             // If the magic bytes do not match, return an InvalidMagic error.
             return Err(HeaderError::InvalidMagic);
         }
 
         // Read the version (2 bytes) from offset 4 using BigEndian byte order.
         let version = BigEndian::read_u16(&decrypted[4..6]);
-        // Verify that the version is at least 1.
-        if version < 1 {
-            // If the version is less than 1, return an UnsupportedVersion error.
+        // Verify that the version is at least 1 and supported (<= 5).
+        if version < 1 || version > 5 {
+            // If the version is not supported, return an UnsupportedVersion error.
             return Err(HeaderError::UnsupportedVersion(version));
         }
 
@@ -234,15 +234,13 @@ impl VolumeHeader {
         // But if it was read as something else, we should probably respect it or fail?
         // VeraCrypt implementation forces 512 for < 5.
         
-        let sector_size = if version >= 5 {
-            // Version 5+: Sector size is at offset 64
-             let s = BigEndian::read_u32(&decrypted[64..68]);
-             if s == 0 { return Err(HeaderError::InvalidSectorSize(0)); }
-             s
-        } else {
+        let mut sector_size = BigEndian::read_u32(&decrypted[64..68]);
+        if version < 5 {
              // Version < 5: Strictly 512 bytes
-             512
-        };
+             sector_size = 512;
+        } else if sector_size == 0 {
+             return Err(HeaderError::InvalidSectorSize(0));
+        }
 
         // Validate sector size
         if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 {
@@ -388,12 +386,7 @@ impl VolumeHeader {
         BigEndian::write_u32(&mut buffer[header_start + 60..header_start + 64], self.flags);
         
         // Write Sector Size (4 bytes) at offset 64.
-        // Write Sector Size at 64 (Always write it if we support > 512, strict VC might ignore it if ver < 5)
-        // Strictly speaking, if ver < 5, this area is reserved/undefined. Writing 0 or 512 is safe?
-        // Let's write it only if ver >= 5 to be compliant.
-        if self.version >= 5 {
-             BigEndian::write_u32(&mut buffer[header_start + 64..header_start + 68], self.sector_size);
-        }
+        BigEndian::write_u32(&mut buffer[header_start + 64..header_start + 68], self.sector_size);
         
         // Write Key Area (256 bytes) at offset 192 (header_start + 192).
         buffer[header_start + 192..header_start + 448].copy_from_slice(&self.master_key_data);

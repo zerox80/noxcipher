@@ -123,7 +123,7 @@ class NoxCipherDocumentsProvider : DocumentsProvider() {
         val (readFd, writeFd) = ParcelFileDescriptor.createReliablePipe()
 
         try {
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { os ->
                         val buffer = java.nio.ByteBuffer.allocate(8192)
