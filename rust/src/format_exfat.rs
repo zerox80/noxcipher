@@ -4,8 +4,6 @@ use std::io::{self, Write, Seek, SeekFrom};
 
 // Minimal ExFAT Formatter
 const SECTOR_SIZE: u64 = 512;
-const SECTORS_PER_CLUSTER: u64 = 8; // 4KB
-const CLUSTER_SIZE: u64 = SECTOR_SIZE * SECTORS_PER_CLUSTER;
 
 struct ExFatGeometry {
     total_sectors: u64,
@@ -18,6 +16,7 @@ struct ExFatGeometry {
     upcase_cluster: u32,
     upcase_clusters_count: u32,
     root_dir_cluster: u32,
+    sectors_per_cluster: u32,
 }
 
 fn invalid_input(message: &'static str) -> io::Error {
@@ -40,13 +39,21 @@ fn calculate_geometry(volume_size: u64) -> io::Result<ExFatGeometry> {
     // Boot sequence is 24 sectors
     let fat_offset = 24u32;
     
+    // Dynamic cluster size
+    let sectors_per_cluster = if volume_size <= 32 * 1024 * 1024 * 1024 {
+        8u32 // <=32GB use 4KB
+    } else {
+        256u32 // >32GB use 128KB
+    };
+    let cluster_size = (SECTOR_SIZE * sectors_per_cluster as u64) as u32;
+
     // Calculate space for FAT and Cluster Heap
     let available_sectors = total_sectors.saturating_sub(fat_offset as u64);
     
-    // 1 cluster = 8 sectors. 1 FAT entry = 4 bytes = 1/128 sector.
-    // Let C be cluster count. C * 8 + C / 128 = available_sectors
-    // C * 1025 / 128 = available_sectors
-    let approx_clusters = (available_sectors * 128) / 1025;
+    // 1 cluster = `sectors_per_cluster`. 1 FAT entry = 4 bytes = 1/128 sector.
+    // C * sectors + C / 128 = available
+    // C * (128 * sectors_per_cluster + 1) / 128 = available
+    let approx_clusters = (available_sectors * 128) / (128 * sectors_per_cluster as u64 + 1);
     
     let fat_length_bytes = (approx_clusters + 2) * 4;
     let fat_length_sectors = (fat_length_bytes + SECTOR_SIZE - 1) / SECTOR_SIZE;
@@ -58,7 +65,7 @@ fn calculate_geometry(volume_size: u64) -> io::Result<ExFatGeometry> {
     let cluster_heap_offset = cluster_heap_offset + extra_align;
     
     let usable_sectors_for_heap = total_sectors.saturating_sub(cluster_heap_offset as u64);
-    let cluster_count = (usable_sectors_for_heap / SECTORS_PER_CLUSTER) as u32;
+    let cluster_count = (usable_sectors_for_heap / sectors_per_cluster as u64) as u32;
     
     if cluster_count < 10 {
         return Err(invalid_input("Volume too small for ExFAT data"));
@@ -66,10 +73,10 @@ fn calculate_geometry(volume_size: u64) -> io::Result<ExFatGeometry> {
 
     // 1 bit per cluster
     let bitmap_bytes = (cluster_count + 7) / 8;
-    let bitmap_clusters_count = (bitmap_bytes as u64 + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    let bitmap_clusters_count = (bitmap_bytes + cluster_size - 1) / cluster_size;
     
     let upcase_bytes = 128 * 1024; // 128 KB
-    let upcase_clusters_count = upcase_bytes / CLUSTER_SIZE;
+    let upcase_clusters_count = (upcase_bytes + cluster_size - 1) / cluster_size;
 
     Ok(ExFatGeometry {
         total_sectors,
@@ -78,10 +85,11 @@ fn calculate_geometry(volume_size: u64) -> io::Result<ExFatGeometry> {
         cluster_heap_offset,
         cluster_count,
         bitmap_cluster: 2,
-        bitmap_clusters_count: bitmap_clusters_count as u32,
-        upcase_cluster: 2 + bitmap_clusters_count as u32,
-        upcase_clusters_count: upcase_clusters_count as u32,
-        root_dir_cluster: 2 + bitmap_clusters_count as u32 + upcase_clusters_count as u32,
+        bitmap_clusters_count,
+        upcase_cluster: 2 + bitmap_clusters_count,
+        upcase_clusters_count,
+        root_dir_cluster: 2 + bitmap_clusters_count + upcase_clusters_count,
+        sectors_per_cluster,
     })
 }
 
@@ -107,7 +115,8 @@ fn checksum_upcase(data: &[u8]) -> u32 {
 pub fn format_exfat<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Result<()> {
     let geometry = calculate_geometry(volume_size)?;
     let volume_id = generate_volume_id()?;
-    
+    let cluster_size = (SECTOR_SIZE * geometry.sectors_per_cluster as u64) as u32;
+
     // 1. Build Up-Case Table
     let mut upcase_table = vec![0u8; 128 * 1024];
     for i in 0..65536u32 {
@@ -128,8 +137,6 @@ pub fn format_exfat<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     boot_region[2] = 0x90;
     // Name "EXFAT   "
     boot_region[3..11].copy_from_slice(b"EXFAT   ");
-    
-    // Must Be Zero: 11..64
     
     // PartitionOffset
     LittleEndian::write_u64(&mut boot_region[64..72], 0);
@@ -154,7 +161,7 @@ pub fn format_exfat<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     // BytesPerSectorShift
     boot_region[108] = 9; // 512 = 2^9
     // SectorsPerClusterShift
-    boot_region[109] = 3; // 8 = 2^3
+    boot_region[109] = geometry.sectors_per_cluster.trailing_zeros() as u8;
     // NumberOfFats
     boot_region[110] = 1;
     // DriveSelect
@@ -166,22 +173,9 @@ pub fn format_exfat<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     boot_region[510] = 0x55;
     boot_region[511] = 0xAA;
     
-    // Sectors 1-8 are Extended Boot Sectors. Leave as 0 but with signature.
-    for s in 1..=8 {
+    // Extended Boot Sectors and OEM Parameter Record
+    for s in 1..=10 {
         let offset = s * 512;
-        boot_region[offset + 510] = 0x55;
-        boot_region[offset + 511] = 0xAA;
-    }
-    
-    // Sector 9 is OEM Parameter Record, leave 0 with signature.
-    {
-        let offset = 9 * 512;
-        boot_region[offset + 510] = 0x55;
-        boot_region[offset + 511] = 0xAA;
-    }
-    // Sector 10 is Reserved, leave 0 with signature.
-    {
-        let offset = 10 * 512;
         boot_region[offset + 510] = 0x55;
         boot_region[offset + 511] = 0xAA;
     }
@@ -208,56 +202,104 @@ pub fn format_exfat<W: Write + Seek>(writer: &mut W, volume_size: u64) -> io::Re
     writer.seek(SeekFrom::Start(12 * 512))?;
     writer.write_all(&boot_region)?;
     
-    // 3. Initialize FAT
-    // Only one FAT
-    // Size = FAT length sectors * 512
-    let mut fat = vec![0u8; geometry.fat_length as usize * 512];
-    LittleEndian::write_u32(&mut fat[0..4], 0xFFFFFFF8); // Media
-    LittleEndian::write_u32(&mut fat[4..8], 0xFFFFFFFF); // Reserved
+    // 3. Initialize FAT in chunks (to fix out-of-memory issue)
+    writer.seek(SeekFrom::Start(geometry.fat_offset as u64 * 512))?;
     
-    // Fill FAT for allocated clusters
-    // We allocate cluster 2 to root_dir_cluster sequentially
+    let mut fat_chunk = vec![0u8; 1024 * 1024]; // 1MB chunk
+    let mut fat_written = 0;
+    let fat_total_bytes = geometry.fat_length as u64 * 512;
+    
     let last_allocated = geometry.root_dir_cluster;
-    for i in 2..=last_allocated {
-        let val = if i == geometry.bitmap_cluster + geometry.bitmap_clusters_count - 1 
-                  || i == geometry.upcase_cluster + geometry.upcase_clusters_count - 1 
-                  || i == geometry.root_dir_cluster {
-            0xFFFFFFFF // EOC
-        } else {
-            i + 1
-        };
-        LittleEndian::write_u32(&mut fat[i as usize * 4..(i + 1) as usize * 4], val);
+    let mut current_cluster = 0u32;
+    
+    while fat_written < fat_total_bytes {
+        let to_write = std::cmp::min(fat_chunk.len() as u64, fat_total_bytes - fat_written) as usize;
+        // Zero out the chunk
+        for b in &mut fat_chunk[..to_write] { *b = 0; }
+        
+        for i in 0..(to_write / 4) {
+            let val = if current_cluster == 0 {
+                0xFFFFFFF8 // Media
+            } else if current_cluster == 1 {
+                0xFFFFFFFF // Reserved
+            } else if current_cluster >= 2 && current_cluster <= last_allocated {
+                let mut next_val = current_cluster + 1;
+                // End of chain
+                if current_cluster == geometry.bitmap_cluster + geometry.bitmap_clusters_count - 1 
+                   || current_cluster == geometry.upcase_cluster + geometry.upcase_clusters_count - 1 
+                   || current_cluster == geometry.root_dir_cluster {
+                    next_val = 0xFFFFFFFF;
+                }
+                next_val
+            } else {
+                0 // Unused
+            };
+            LittleEndian::write_u32(&mut fat_chunk[i * 4..(i + 1) * 4], val);
+            current_cluster += 1;
+        }
+        
+        writer.write_all(&fat_chunk[..to_write])?;
+        fat_written += to_write as u64;
     }
     
-    writer.seek(SeekFrom::Start(geometry.fat_offset as u64 * 512))?;
-    writer.write_all(&fat)?;
-    
+    // Write zeros for alignment gap between FAT and Cluster Heap
+    let fat_end = geometry.fat_offset as u64 * 512 + fat_total_bytes;
+    let heap_start = geometry.cluster_heap_offset as u64 * 512;
+    if heap_start > fat_end {
+        let mut gap = heap_start - fat_end;
+        let zero_chunk = vec![0u8; 65536]; // 64K buffer
+        while gap > 0 {
+            let to_write = std::cmp::min(gap, zero_chunk.len() as u64) as usize;
+            writer.write_all(&zero_chunk[..to_write])?;
+            gap -= to_write as u64;
+        }
+    }
+
     // 4. Write Bitmap
-    let bitmap_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.bitmap_cluster - 2) as u64 * CLUSTER_SIZE;
+    let bitmap_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.bitmap_cluster - 2) as u64 * cluster_size as u64;
     writer.seek(SeekFrom::Start(bitmap_pos))?;
     let bitmap_size_bytes = (geometry.cluster_count + 7) / 8;
     let mut bitmap = vec![0u8; bitmap_size_bytes as usize];
     
-    // Set bits for allocated clusters (from 2 to last_allocated)
+    // Set bits for allocated clusters
     for c in 2..=last_allocated {
-        let bit_index = c - 2;
-        bitmap[(bit_index / 8) as usize] |= 1 << (bit_index % 8);
+        let bit_index = (c - 2) as usize;
+        bitmap[bit_index / 8] |= 1 << (bit_index % 8);
     }
-    // Pad exactly one cluster size
-    let mut bitmap_padded = bitmap.clone();
-    bitmap_padded.resize((geometry.bitmap_clusters_count as u64 * CLUSTER_SIZE) as usize, 0);
-    writer.write_all(&bitmap_padded)?;
+    
+    let bitmap_total_bytes = geometry.bitmap_clusters_count as u64 * cluster_size as u64;
+    writer.write_all(&bitmap)?;
+    // Pad to cluster size boundary
+    if bitmap_total_bytes > bitmap.len() as u64 {
+        let mut gap = bitmap_total_bytes - bitmap.len() as u64;
+        let zero_chunk = vec![0u8; 65536];
+        while gap > 0 {
+            let to_write = std::cmp::min(gap, zero_chunk.len() as u64) as usize;
+            writer.write_all(&zero_chunk[..to_write])?;
+            gap -= to_write as u64;
+        }
+    }
     
     // 5. Write Up-case Table
-    let upcase_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.upcase_cluster - 2) as u64 * CLUSTER_SIZE;
+    let upcase_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.upcase_cluster - 2) as u64 * cluster_size as u64;
     writer.seek(SeekFrom::Start(upcase_pos))?;
     writer.write_all(&upcase_table)?;
+    let upcase_total_bytes = geometry.upcase_clusters_count as u64 * cluster_size as u64;
+    if upcase_total_bytes > upcase_table.len() as u64 {
+        let mut gap = upcase_total_bytes - upcase_table.len() as u64;
+        let zero_chunk = vec![0u8; 65536];
+        while gap > 0 {
+            let to_write = std::cmp::min(gap, zero_chunk.len() as u64) as usize;
+            writer.write_all(&zero_chunk[..to_write])?;
+            gap -= to_write as u64;
+        }
+    }
     
     // 6. Write Root Directory
-    let root_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.root_dir_cluster - 2) as u64 * CLUSTER_SIZE;
+    let root_pos = geometry.cluster_heap_offset as u64 * 512 + (geometry.root_dir_cluster - 2) as u64 * cluster_size as u64;
     writer.seek(SeekFrom::Start(root_pos))?;
     
-    let mut root_dir = vec![0u8; CLUSTER_SIZE as usize];
+    let mut root_dir = vec![0u8; cluster_size as usize];
     
     // Entry 1: Volume Label (0x83)
     root_dir[0] = 0x83;
