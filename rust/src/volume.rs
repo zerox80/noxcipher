@@ -478,8 +478,11 @@ pub fn create_context(
                             let start = partition_start_offset.checked_add(65536)
                                 .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
                             
-                            let end = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
-                                .and_then(|sum| sum.checked_add(hidden_vol.header.volume_data_size))
+                            let max_offset = hidden_vol.header.encrypted_area_start
+                                .checked_add(hidden_vol.header.volume_data_size)
+                                .ok_or(VolumeError::CryptoError("Hidden volume volume size overflow".to_string()))?;
+
+                            let end = partition_start_offset.checked_add(max_offset)
                                 .ok_or(VolumeError::CryptoError("Hidden volume end offset overflow".to_string()))?;
                                 
                             vol.set_protection(start, end);
@@ -555,17 +558,17 @@ pub fn create_context(
                          log::info!("Mounted Backup Header");
                          vol.used_backup_header = true;
                          // Fix Bug 4: Update header_offset to absolute position
-                         if volume_size >= 131072 {
-                             vol.header_offset = volume_size - 131072;
+                         if volume_size >= TOTAL_VOLUME_HEADER_AREA_SIZE {
+                             vol.header_offset = volume_size - PRIMARY_VOLUME_HEADER_AREA_SIZE;
                          }
                          return register_context(vol);
                      }
                      Err(_) => attempt_errors.push("Backup Header: Failed".to_string()),
                  }
             }
-        } else if volume_size >= 131072 {
+        } else if volume_size >= TOTAL_VOLUME_HEADER_AREA_SIZE {
             // Fallback to legacy behavior if backup_header_bytes not provided but buffer might be large enough
-            let backup_offset = volume_size - 131072;
+            let backup_offset = volume_size - PRIMARY_VOLUME_HEADER_AREA_SIZE;
             
             // Check overflow for + 512
             if backup_offset.checked_add(512).map_or(false, |end| (header_bytes.len() as u64) >= end) {
@@ -766,17 +769,17 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
             Ok(SupportedCipher::Twofish(Xts128::new(TwofishWrapper::new(key_1.into()), TwofishWrapper::new(key_2.into()))))
         },
         CipherType::AesTwofish => {
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::AesTwofish(
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::AesTwofishSerpent => {
-             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::AesTwofishSerpent(
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into())),
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
@@ -784,25 +787,25 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
              ))
         },
         CipherType::SerpentAes => {
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::SerpentAes(
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::TwofishSerpent => {
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::TwofishSerpent(
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into()))
             ))
         },
         CipherType::SerpentTwofishAes => {
-             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_aes_1, key_aes_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::SerpentTwofishAes(
                  Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
                  Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into())),
@@ -818,33 +821,33 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
             Ok(SupportedCipher::Kuznyechik(Xts128::new(KuznyechikWrapper::new(key_1.into()), KuznyechikWrapper::new(key_2.into()))))
         },
         CipherType::CamelliaKuznyechik => {
-            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::CamelliaKuznyechik(
                 Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into())),
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into()))
             ))
         },
         CipherType::CamelliaSerpent => {
-            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::CamelliaSerpent(
                 Xts128::new(CamelliaWrapper::new(key_camellia_1.into()), CamelliaWrapper::new(key_camellia_2.into())),
                 Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into()))
             ))
         },
         CipherType::KuznyechikAes => {
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_aes_1, key_aes_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::KuznyechikAes(
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                 Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()))
             ))
         },
         CipherType::KuznyechikSerpentCamellia => {
-             let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
+             let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 0, component_count)?;
              let (key_serpent_1, key_serpent_2) = cipher_key_pair(key, 1, component_count)?;
-             let (key_camellia_1, key_camellia_2) = cipher_key_pair(key, 2, component_count)?;
+             let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 2, component_count)?;
              Ok(SupportedCipher::KuznyechikSerpentCamellia(
                  Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                  Xts128::new(SerpentWrapper::new(key_serpent_1.into()), SerpentWrapper::new(key_serpent_2.into())),
@@ -852,8 +855,8 @@ fn create_cipher(alg: CipherType, key: &[u8]) -> Result<SupportedCipher, VolumeE
              ))
         },
         CipherType::KuznyechikTwofish => {
-            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 0, component_count)?;
-            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 1, component_count)?;
+            let (key_twofish_1, key_twofish_2) = cipher_key_pair(key, 0, component_count)?;
+            let (key_kuznyechik_1, key_kuznyechik_2) = cipher_key_pair(key, 1, component_count)?;
             Ok(SupportedCipher::KuznyechikTwofish(
                 Xts128::new(KuznyechikWrapper::new(key_kuznyechik_1.into()), KuznyechikWrapper::new(key_kuznyechik_2.into())),
                 Xts128::new(TwofishWrapper::new(key_twofish_1.into()), TwofishWrapper::new(key_twofish_2.into()))
