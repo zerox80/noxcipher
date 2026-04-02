@@ -460,7 +460,7 @@ pub fn create_context(
                             // Protected Range Start = header_offset_bias + hidden_vol.header.encrypted_area_start
                             // Protected Range End = Protected Range Start + hidden_vol.header.volume_data_size
                             
-                            let start = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
+                            let start = header_offset_bias.checked_add(hidden_vol.header.encrypted_area_start)
                                 .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
                             
                             let end = start.checked_add(hidden_vol.header.volume_data_size)
@@ -563,6 +563,7 @@ pub fn create_context(
                 ) {
                     log::info!("Mounted Backup Header (Embedded)");
                     vol.used_backup_header = true;
+                    vol.header_offset = backup_offset;
                     return register_context(vol);
                 } else {
                      attempt_errors.push("Backup Header (Embedded): Failed".to_string());

@@ -354,8 +354,8 @@ pub enum SupportedCipher {
     // Cascade cipher variants (Order matters: Outer -> Inner).
     // AES then Twofish cascade.
     AesTwofish(
-        Xts128<AesWrapper>,
         Xts128<TwofishWrapper>,
+        Xts128<AesWrapper>,
     ),
     // AES then Twofish then Serpent cascade.
     AesTwofishSerpent(
@@ -470,11 +470,11 @@ impl SupportedCipher {
             SupportedCipher::Twofish(xts) => xts.decrypt_area(data, sector_size, 0, get_tweak),
 
             // For AesTwofish cascade:
-            SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                // First decrypt with AES.
-                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
-                // Then decrypt with Twofish.
+            SupportedCipher::AesTwofish(xts_twofish, xts_aes) => {
+                // First decrypt with Twofish.
                 xts_twofish.decrypt_area(data, sector_size, 0, get_tweak);
+                // Then decrypt with AES.
+                xts_aes.decrypt_area(data, sector_size, 0, get_tweak);
             }
             // For AesTwofishSerpent cascade:
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {
@@ -579,12 +579,12 @@ impl SupportedCipher {
             // For single Twofish, call encrypt_area.
             SupportedCipher::Twofish(xts) => xts.encrypt_area(data, sector_size, 0, get_tweak),
 
-            // For AesTwofish cascade (Decrypt: Aes -> Twofish):
-            SupportedCipher::AesTwofish(xts_aes, xts_twofish) => {
-                // Encrypt with Twofish first.
-                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
-                // Then encrypt with AES.
+            // For AesTwofish cascade (Decrypt: Twofish -> Aes):
+            SupportedCipher::AesTwofish(xts_twofish, xts_aes) => {
+                // Encrypt with AES first.
                 xts_aes.encrypt_area(data, sector_size, 0, get_tweak);
+                // Then encrypt with Twofish.
+                xts_twofish.encrypt_area(data, sector_size, 0, get_tweak);
             }
             // For AesTwofishSerpent cascade (Decrypt: Aes -> Twofish -> Serpent):
             SupportedCipher::AesTwofishSerpent(xts_aes, xts_twofish, xts_serpent) => {

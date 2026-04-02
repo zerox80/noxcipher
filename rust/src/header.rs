@@ -188,6 +188,12 @@ impl VolumeHeader {
 
         // Read the key area CRC32 (4 bytes) from offset 8.
         let key_area_crc32 = BigEndian::read_u32(&decrypted[8..12]);
+        
+        let key_area_crc_calc = crc32fast::hash(&decrypted[192..448]);
+        if key_area_crc32 != key_area_crc_calc {
+            return Err(HeaderError::InvalidKeyAreaCrc);
+        }
+
         // Read the volume creation time (8 bytes) from offset 12.
         let volume_creation_time = BigEndian::read_u64(&decrypted[12..20]);
         // Read the header creation time (8 bytes) from offset 20.
@@ -239,19 +245,8 @@ impl VolumeHeader {
         };
 
         // Validate sector size
-        if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 || !sector_size.is_power_of_two() {
+        if !(512..=4096).contains(&sector_size) || sector_size % 512 != 0 {
             return Err(HeaderError::InvalidSectorSize(sector_size));
-        }
-
-        // Validate the Key Area CRC.
-        // The key area starts at offset 192 (relative to decrypted start) and is 256 bytes long.
-        // Calculate the CRC32 of the key area (bytes 192 to 448).
-        let key_area_crc_calc = crc32fast::hash(&decrypted[192..448]);
-        // Compare the stored key area CRC with the calculated one.
-        if key_area_crc32 != key_area_crc_calc {
-            // If they don't match, return an InvalidCrc error.
-            // This indicates potential corruption of the master keys.
-            return Err(HeaderError::InvalidKeyAreaCrc);
         }
 
         // Initialize a 256-byte array for the master key data, filled with zeros.
