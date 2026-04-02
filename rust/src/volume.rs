@@ -217,6 +217,10 @@ impl Volume {
         // Get the sector size as usize.
         let sector_size = self.header.sector_size as usize;
 
+        if sector_size < 512 || sector_size % 512 != 0 {
+            return Err(VolumeError::CryptoError(format!("Invalid sector size: {}", sector_size)));
+        }
+
         if data.len() % sector_size != 0 {
             // Return an error if not aligned.
             return Err(VolumeError::CryptoError(format!(
@@ -294,6 +298,11 @@ impl Volume {
 
         // Get the sector size.
         let sector_size = self.header.sector_size as usize;
+
+        if sector_size < 512 || sector_size % 512 != 0 {
+            return Err(VolumeError::CryptoError(format!("Invalid sector size: {}", sector_size)));
+        }
+        
         // Calculate the start offset of the write operation.
         let start_offset = sector_index.checked_mul(sector_size as u64)
             .ok_or(VolumeError::CryptoError("Write start offset overflow".to_string()))?;
@@ -463,13 +472,14 @@ pub fn create_context(
                             // The code below was: offset 65536 + size. This assumes data starts at 65536, which is WRONG.
                             
                             // Correct logic:
-                            // Protected Range Start = partition_start_offset + hidden_vol.header.encrypted_area_start
-                            // Protected Range End = Protected Range Start + hidden_vol.header.volume_data_size
+                            // Protected Range Start = partition_start_offset + 65536 (to include the hidden header itself)
+                            // Protected Range End = partition_start_offset + hidden_vol.header.encrypted_area_start + hidden_vol.header.volume_data_size
                             
-                            let start = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
+                            let start = partition_start_offset.checked_add(65536)
                                 .ok_or(VolumeError::CryptoError("Hidden volume start offset overflow".to_string()))?;
                             
-                            let end = start.checked_add(hidden_vol.header.volume_data_size)
+                            let end = partition_start_offset.checked_add(hidden_vol.header.encrypted_area_start)
+                                .and_then(|sum| sum.checked_add(hidden_vol.header.volume_data_size))
                                 .ok_or(VolumeError::CryptoError("Hidden volume end offset overflow".to_string()))?;
                                 
                             vol.set_protection(start, end);
@@ -1013,7 +1023,7 @@ impl<'a, W: Read + Write + Seek> Seek for EncryptedVolumeWriter<'a, W> {
 }
 
 // Helper to derive key (generic)
-fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], prf: PrfAlgorithm) {
+fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], prf: PrfAlgorithm) -> Result<(), VolumeError> {
     if prf == PrfAlgorithm::Argon2id {
         let pim_val = if pim <= 0 { 12 } else { pim };
         let t_cost = if pim_val <= 31 {
@@ -1025,11 +1035,12 @@ fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], pr
         let m_cost_kib = m_cost_mib * 1024;
         
         // Parallelism = 1
-        if let Ok(params) = argon2::Params::new(m_cost_kib, t_cost, 1, Some(key.len())) {
-            let a2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-            a2.hash_password_into(password, salt, key).ok();
-        }
-        return;
+        let params = argon2::Params::new(m_cost_kib, t_cost, 1, Some(key.len()))
+            .map_err(|_| VolumeError::CryptoError("Invalid Argon2 parameters".to_string()))?;
+        let a2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        a2.hash_password_into(password, salt, key)
+            .map_err(|_| VolumeError::CryptoError("Argon2id KDF failed".to_string()))?;
+        return Ok(());
     }
 
     let iter = if pim > 0 {
@@ -1049,15 +1060,23 @@ fn derive_key_generic(password: &[u8], salt: &[u8], pim: i32, key: &mut [u8], pr
     };
 
     match prf {
-        PrfAlgorithm::Sha512 => { pbkdf2::<Hmac<Sha512>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Sha256 => { pbkdf2::<Hmac<Sha256>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Whirlpool => { pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Ripemd160 => { pbkdf2::<Hmac<Ripemd160>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Streebog => { pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Blake2s => { pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, key).ok(); },
-        PrfAlgorithm::Sha1 => { pbkdf2::<Hmac<Sha1>>(password, salt, iter, key).ok(); },
+        PrfAlgorithm::Sha512 => pbkdf2::<Hmac<Sha512>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-SHA512 failed".to_string()))?,
+        PrfAlgorithm::Sha256 => pbkdf2::<Hmac<Sha256>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-SHA256 failed".to_string()))?,
+        PrfAlgorithm::Whirlpool => pbkdf2::<Hmac<Whirlpool>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-Whirlpool failed".to_string()))?,
+        PrfAlgorithm::Ripemd160 => pbkdf2::<Hmac<Ripemd160>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-RIPEMD160 failed".to_string()))?,
+        PrfAlgorithm::Streebog => pbkdf2::<SimpleHmac<Streebog512>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-Streebog failed".to_string()))?,
+        PrfAlgorithm::Blake2s => pbkdf2::<SimpleHmac<Blake2s256>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-Blake2s failed".to_string()))?,
+        PrfAlgorithm::Sha1 => pbkdf2::<Hmac<Sha1>>(password, salt, iter, key)
+            .map_err(|_| VolumeError::CryptoError("PBKDF2-HMAC-SHA1 failed".to_string()))?,
         PrfAlgorithm::Argon2id => unreachable!(),
     }
+    Ok(())
 }
 
 pub fn create_volume(
@@ -1085,8 +1104,11 @@ pub fn create_volume(
     let mut mk_arr = Zeroizing::new([0u8; 256]);
     mk_arr[..required_key_size].copy_from_slice(&master_key[..required_key_size]);
     
+    if salt.len() != 64 {
+        return Err(VolumeError::CryptoError("Salt must be exactly 64 bytes".to_string()));
+    }
     let mut salt_arr = Zeroizing::new([0u8; 64]);
-    if salt.len() <= 64 { salt_arr[..salt.len()].copy_from_slice(salt); } else { salt_arr.copy_from_slice(&salt[..64]); }
+    salt_arr.copy_from_slice(salt);
 
     // Check for weak keys (simplified - checking all 32-byte chunks)
     for i in (0..required_key_size).step_by(XTS_KEY_SIZE) {
@@ -1483,18 +1505,8 @@ fn try_header_at_offset(
         }
 
         // 6. RIPEMD-160
-        // Calculate specific iteration count for RIPEMD-160.
-        // Map standard iteration counts to RIPEMD specific ones.
-        let ripemd_iter = if iter == 500_000 {
-            655_331
-        } else if iter == 200_000 {
-            327_661
-        } else {
-            iter
-        };
-
         // Derive key using PBKDF2-HMAC-Ripemd160.
-        pbkdf2::<Hmac<Ripemd160>>(password, salt, ripemd_iter, &mut *header_key).ok();
+        pbkdf2::<Hmac<Ripemd160>>(password, salt, iter, &mut *header_key).ok();
         // Try to unlock.
         match try_unlock(&*header_key, PrfAlgorithm::Ripemd160, &mut last_debug) {
             Ok(vol) => {
@@ -1766,10 +1778,10 @@ fn try_cipher_aes_twofish(
     // Key mapping: 0..32 -> Twofish, 32..64 -> AES.
 
     // Extract keys.
-    let key_twofish_1 = &header_key[0..32];
-    let key_aes_1 = &header_key[32..64];
-    let key_twofish_2 = &header_key[64..96];
-    let key_aes_2 = &header_key[96..128];
+    let key_aes_1 = &header_key[0..32];
+    let key_twofish_1 = &header_key[32..64];
+    let key_aes_2 = &header_key[64..96];
+    let key_twofish_2 = &header_key[96..128];
 
     // Create XTS instances.
     let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
@@ -1838,13 +1850,13 @@ fn try_cipher_aes_twofish_serpent(
     prf: Option<PrfAlgorithm>,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
-    let key_serpent_1 = &header_key[0..32];
+    let key_aes_1 = &header_key[0..32];
     let key_twofish_1 = &header_key[32..64];
-    let key_aes_1 = &header_key[64..96];
+    let key_serpent_1 = &header_key[64..96];
 
-    let key_serpent_2 = &header_key[96..128];
+    let key_aes_2 = &header_key[96..128];
     let key_twofish_2 = &header_key[128..160];
-    let key_aes_2 = &header_key[160..192];
+    let key_serpent_2 = &header_key[160..192];
 
     // Create XTS instances.
     let cipher_aes = Xts128::new(AesWrapper::new(key_aes_1.into()), AesWrapper::new(key_aes_2.into()));
@@ -1920,10 +1932,10 @@ fn try_cipher_serpent_aes(
     prf: Option<PrfAlgorithm>,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
-    let key_aes_1 = &header_key[0..32];
-    let key_serpent_1 = &header_key[32..64];
-    let key_aes_2 = &header_key[64..96];
-    let key_serpent_2 = &header_key[96..128];
+    let key_serpent_1 = &header_key[0..32];
+    let key_aes_1 = &header_key[32..64];
+    let key_serpent_2 = &header_key[64..96];
+    let key_aes_2 = &header_key[96..128];
 
     // Create XTS instances.
     let cipher_serpent = Xts128::new(
@@ -1988,10 +2000,10 @@ fn try_cipher_twofish_serpent(
     prf: Option<PrfAlgorithm>,
 ) -> Result<Volume, VolumeError> {
     // Extract keys.
-    let key_serpent_1 = &header_key[0..32];
-    let key_twofish_1 = &header_key[32..64];
-    let key_serpent_2 = &header_key[64..96];
-    let key_twofish_2 = &header_key[96..128];
+    let key_twofish_1 = &header_key[0..32];
+    let key_serpent_1 = &header_key[32..64];
+    let key_twofish_2 = &header_key[64..96];
+    let key_serpent_2 = &header_key[96..128];
 
     // Create XTS instances.
     let cipher_twofish = Xts128::new(
