@@ -261,19 +261,13 @@ impl Volume {
                 // Calculate unit number (tweak) carefully using checked arithmetic
                 // unitNo = startUnitNo + i
                 // startUnitNo = (partition_start_offset + encrypted_area_start + current_sector * sector_size) / 512
-                
-                let sector_offset = current_sector.checked_mul(sector_size as u64)
-                    .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
-                
-                // VeraCrypt data unit bounds start at 0 relative to the encrypted payload
-                // Exception is ONLY full system encryption which uses absolute physical sectors
-                let payload_offset = self.partition_start_offset
-                    .checked_add(sector_offset)
-                    .ok_or(VolumeError::CryptoError("Payload offset overflow".to_string()))?;
-                
-                let start_unit_no = payload_offset / 512;
-                let unit_no = start_unit_no.checked_add(i as u64)
-                    .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
+                let unit_no = data_unit_number(
+                    self.partition_start_offset,
+                    self.header.encrypted_area_start,
+                    sector_size as u64,
+                    current_sector,
+                    i,
+                )?;
 
                 // Decrypt the 512-byte area using the cipher.
                 self.cipher.decrypt_area(
@@ -370,16 +364,13 @@ impl Volume {
 
                 // Calculate unit number (tweak).
                 // Calculate unit number (tweak) with overflow protection.
-                let sector_offset = current_sector.checked_mul(sector_size as u64)
-                    .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
-
-                let payload_offset = self.partition_start_offset
-                    .checked_add(sector_offset)
-                    .ok_or(VolumeError::CryptoError("Payload offset overflow".to_string()))?;
-
-                let start_unit_no = payload_offset / 512;
-                let unit_no = start_unit_no.checked_add(i as u64)
-                    .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))?;
+                let unit_no = data_unit_number(
+                    self.partition_start_offset,
+                    self.header.encrypted_area_start,
+                    sector_size as u64,
+                    current_sector,
+                    i,
+                )?;
 
                 // Encrypt the area.
                 self.cipher.encrypt_area(
@@ -426,6 +417,12 @@ pub fn create_context(
         return Err(VolumeError::InvalidPassword("Protection PIM cannot be negative".to_string()));
     }
 
+    let hidden_header_offset = || {
+        header_offset_bias.checked_add(65536).ok_or_else(|| {
+            VolumeError::CryptoError("Hidden header offset overflow".to_string())
+        })
+    };
+
     // 1. Try Standard Header at offset 0 (relative to header_offset_bias)
     let mut attempt_errors = Vec::new();
     
@@ -434,7 +431,7 @@ pub fn create_context(
         password,
         header_bytes,
         pim,
-        0, header_offset_bias + 0u64, // buffer_offset, header_offset
+        0, header_offset_bias, // buffer_offset, header_offset
         partition_start_offset,
         None,
     ) {
@@ -448,7 +445,7 @@ pub fn create_context(
                         prot_pass,
                         header_bytes,
                         protection_pim,
-                        65536, header_offset_bias + 65536u64, // buffer_offset, header_offset
+                        65536, hidden_header_offset()?, // buffer_offset, header_offset
                         partition_start_offset,
                         None,
                     ) {
@@ -502,7 +499,7 @@ pub fn create_context(
             password,
             header_bytes,
             pim,
-            65536, header_offset_bias + 65536u64, // buffer_offset, header_offset
+            65536, hidden_header_offset()?, // buffer_offset, header_offset
             partition_start_offset,
             None,
         ) {
@@ -591,6 +588,26 @@ const XTS_KEY_SIZE: usize = 32;
 const PRIMARY_VOLUME_HEADER_AREA_SIZE: u64 = 131072;
 const TOTAL_VOLUME_HEADER_AREA_SIZE: u64 = PRIMARY_VOLUME_HEADER_AREA_SIZE * 2;
 const MIN_FILE_HOSTED_VOLUME_SIZE: u64 = 299008;
+
+fn data_unit_number(
+    partition_start_offset: u64,
+    encrypted_area_start: u64,
+    sector_size: u64,
+    sector_index: u64,
+    unit_index: usize,
+) -> Result<u64, VolumeError> {
+    let sector_offset = sector_index
+        .checked_mul(sector_size)
+        .ok_or(VolumeError::CryptoError("Sector offset overflow".to_string()))?;
+    let payload_offset = partition_start_offset
+        .checked_add(encrypted_area_start)
+        .and_then(|offset| offset.checked_add(sector_offset))
+        .ok_or(VolumeError::CryptoError("Payload offset overflow".to_string()))?;
+
+    (payload_offset / 512)
+        .checked_add(unit_index as u64)
+        .ok_or(VolumeError::CryptoError("Unit number overflow".to_string()))
+}
 
 fn cipher_component_count(alg: CipherType) -> usize {
     match alg {
@@ -2734,6 +2751,14 @@ mod tests {
             .expect("Failed to encrypt effective header");
 
         assert_eq!(original_salt.as_slice(), &effective_header[..HEADER_SALT_SIZE]);
+    }
+
+    #[test]
+    fn test_data_unit_number_includes_encrypted_area_start() {
+        let unit_no = data_unit_number(4096, 131072, 4096, 2, 3)
+            .expect("Failed to compute data unit number");
+
+        assert_eq!(unit_no, ((4096 + 131072 + (2 * 4096)) / 512) + 3);
     }
 }
 

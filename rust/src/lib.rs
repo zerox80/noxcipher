@@ -48,6 +48,9 @@ use lazy_static::lazy_static;
 // Import jobjectArray from jni::sys to represent Java object arrays.
 use jni::sys::jobjectArray;
 
+const MAX_LOG_ENTRIES: usize = 100;
+const MAX_LOG_MESSAGE_CHARS: usize = 4096;
+
 // Use the lazy_static macro to define static variables that are initialized lazily.
 lazy_static! {
     // Define a static global variable named LOG_BUFFER.
@@ -89,13 +92,13 @@ impl log::Log for InMemoryLogger {
 
             // Attempt to lock the global LOG_BUFFER mutex.
             if let Ok(mut buffer) = LOG_BUFFER.lock() {
-                // Check if the buffer size exceeds 100 entries.
-                if buffer.len() > 100 {
-                    // Remove the oldest log entry (at index 0) to maintain a fixed size.
+                let message = clamp_log_message(&record.args().to_string());
+
+                while buffer.len() >= MAX_LOG_ENTRIES {
                     buffer.pop_front();
                 }
-                // Push the new log message into the buffer.
-                buffer.push_back(format!("{}", record.args()));
+
+                buffer.push_back(message);
             }
         }
     }
@@ -107,6 +110,21 @@ impl log::Log for InMemoryLogger {
 
 // Define a static global instance of InMemoryLogger named LOGGER.
 static LOGGER: InMemoryLogger = InMemoryLogger;
+
+fn clamp_log_message(message: &str) -> String {
+    let mut bounded = String::with_capacity(message.len().min(MAX_LOG_MESSAGE_CHARS + 3));
+
+    for (index, ch) in message.chars().enumerate() {
+        if index == MAX_LOG_MESSAGE_CHARS {
+            bounded.push_str("...");
+            return bounded;
+        }
+
+        bounded.push(ch);
+    }
+
+    bounded
+}
 
 // Define a JNI function named Java_com_noxcipher_RustNative_initLogger.
 // It is exposed to Java with the "system" calling convention and no name mangling.
@@ -491,23 +509,10 @@ pub extern "system" fn Java_com_noxcipher_RustNative_decrypt(
 
         // Allocate a Rust vector of zeros with the same length.
         let mut buf = vec![0u8; len as usize];
-        // Get a mutable pointer to the buffer and cast it to i8 (signed byte for JNI).
-        let buf_ptr = buf.as_mut_ptr() as *mut i8;
-        if buf_ptr.is_null() {
-            let _ = env.throw_new("java/lang/RuntimeException", "Allocation failed, null pointer");
-            return;
-        }
-
-        // Allocate a Rust vector of zeros with the same length.
-        let mut buf = vec![0u8; len as usize];
-        // Get a mutable pointer to the buffer and cast it to i8 (signed byte for JNI).
-        let buf_ptr = buf.as_mut_ptr() as *mut i8;
-        if buf_ptr.is_null() {
-            let _ = env.throw_new("java/lang/RuntimeException", "Allocation failed, null pointer");
-            return;
-        }
         // Create a mutable slice from the raw parts.
-        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, len as usize) };
+        let buf_slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, len as usize)
+        };
 
         // Copy data from the Java byte array region into the Rust buffer slice.
         if let Err(e) = env.get_byte_array_region(&data_obj, 0, buf_slice) {

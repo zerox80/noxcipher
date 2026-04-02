@@ -143,6 +143,21 @@ impl Read for DecryptedReader {
         if current_pos >= self.volume.size() {
             return Ok(0);
         }
+
+        if self.sector_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Sector size cannot be zero",
+            ));
+        }
+        if self.sector_size > usize::MAX as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Sector size exceeds platform limits",
+            ));
+        }
+
+        let sector_size = self.sector_size as usize;
         
         // Calculate sector index.
         let sector_index = current_pos / self.sector_size;
@@ -152,12 +167,26 @@ impl Read for DecryptedReader {
         self.read_sector(sector_index)?;
 
         // Calculate available bytes in this sector.
-        let available = self.sector_size as usize - offset_in_sector;
+        let available = sector_size.checked_sub(offset_in_sector).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Sector offset out of bounds")
+        })?;
         let to_read = std::cmp::min(buf.len(), available);
 
         // Copy decrypted data.
-        let buffer = self.sector_buffer.as_ref().unwrap();
-        buf[..to_read].copy_from_slice(&buffer[offset_in_sector..offset_in_sector + to_read]);
+        let buffer = self
+            .sector_buffer
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing sector buffer"))?;
+        let end = offset_in_sector.checked_add(to_read).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Read offset overflow")
+        })?;
+        if end > buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Sector buffer shorter than expected",
+            ));
+        }
+        buf[..to_read].copy_from_slice(&buffer[offset_in_sector..end]);
 
         // Advance internal position.
         self.position += to_read as u64;

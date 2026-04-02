@@ -282,7 +282,10 @@ impl KeySizeUser for SerpentWrapper {
 
 impl KeyInit for SerpentWrapper {
     fn new(key: &Key<Self>) -> Self {
-        SerpentWrapper(Serpent::new_from_slice(key).unwrap_or_else(|_| Serpent::new(0u8.into())))
+        SerpentWrapper(
+            Serpent::new_from_slice(key)
+                .expect("SerpentWrapper requires a 32-byte key"),
+        )
     }
 }
 
