@@ -1,1 +1,0 @@
-Take a look at C:\Daten2\VeraCrypt  for reference.
