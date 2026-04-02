@@ -7,6 +7,7 @@ import android.hardware.usb.UsbManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.noxcipher.util.PartitionDriver
 import com.noxcipher.util.PartitionUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,6 +24,85 @@ import me.jahnen.libaums.core.fs.UsbFile
 import me.jahnen.libaums.core.partition.PartitionTableEntry
 import java.io.IOException
 import java.nio.ByteBuffer
+
+internal data class MountCandidate(
+    val driver: BlockDeviceDriver,
+    val description: String,
+    val volumeSize: Long,
+    val physicalStartOffset: Long = 0L,
+)
+
+internal sealed class HeaderPlan {
+    data class Attempt(
+        val primaryHeaderBytes: ByteArray,
+        val backupHeaderBytes: ByteArray?,
+        val recoveryReason: String? = null,
+    ) : HeaderPlan()
+
+    data class Skip(val reason: String) : HeaderPlan()
+}
+
+internal fun isCommonFileSystemHeader(bytes: ByteArray): Boolean {
+    if (bytes.size < 512) return false
+
+    fun hasString(offset: Int, value: String): Boolean {
+        if (offset + value.length > bytes.size) return false
+        for (i in value.indices) {
+            if (bytes[offset + i] != value[i].code.toByte()) return false
+        }
+        return true
+    }
+
+    return hasString(3, "NTFS") ||
+        hasString(3, "EXFAT") ||
+        hasString(82, "FAT32") ||
+        hasString(54, "FAT16")
+}
+
+internal fun isAllZeroHeader(bytes: ByteArray): Boolean {
+    val checkLen = minOf(bytes.size, 512)
+    for (i in 0 until checkLen) {
+        if (bytes[i] != 0.toByte()) return false
+    }
+    return checkLen > 0
+}
+
+internal fun planHeaderAttempt(primaryHeaderBytes: ByteArray, backupHeaderBytes: ByteArray?): HeaderPlan {
+    val usableBackup = backupHeaderBytes?.takeIf { it.size >= 512 && !isAllZeroHeader(it) }
+
+    if (primaryHeaderBytes.size < 512) {
+        return if (usableBackup != null) {
+            HeaderPlan.Attempt(
+                primaryHeaderBytes = primaryHeaderBytes,
+                backupHeaderBytes = usableBackup,
+                recoveryReason = "Primary header window is too small. Trying backup header recovery.",
+            )
+        } else {
+            HeaderPlan.Skip("Header area is too small to contain a VeraCrypt header")
+        }
+    }
+
+    if (isAllZeroHeader(primaryHeaderBytes)) {
+        return if (usableBackup != null) {
+            HeaderPlan.Attempt(
+                primaryHeaderBytes = primaryHeaderBytes,
+                backupHeaderBytes = usableBackup,
+                recoveryReason = "Primary header is empty. Trying backup header recovery.",
+            )
+        } else {
+            HeaderPlan.Skip("Primary header is empty and no usable backup header was found")
+        }
+    }
+
+    if (isCommonFileSystemHeader(primaryHeaderBytes)) {
+        return HeaderPlan.Skip("Detected an unencrypted filesystem instead of a VeraCrypt header")
+    }
+
+    return HeaderPlan.Attempt(
+        primaryHeaderBytes = primaryHeaderBytes,
+        backupHeaderBytes = usableBackup,
+    )
+}
 
 sealed class ConnectionResult {
     object Success : ConnectionResult()
@@ -46,6 +126,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var connectionJob: Job? = null
     private val connectionMutex = Mutex()
+
+    private data class CandidateDiscovery(
+        val candidates: List<MountCandidate>,
+        val diagnostic: String? = null,
+    )
 
     fun connectDevice(
         usbManager: UsbManager, // Kept for UI compatibility; libaums handles the transport
@@ -82,135 +167,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var success = false
                     var lastError: String? = null
 
-                    // Iterate over all candidate devices (e.g. if one is a mouse or non-VC drive)
                     for (selected in candidateDevices) {
                         try {
                             selected.init()
                         } catch (e: Exception) {
                             Log.w("MainViewModel", "Failed to init device ${selected.usbDevice.deviceName}", e)
+                            lastError = "Failed to initialize USB device ${selected.usbDevice.deviceName}"
                             continue
                         }
 
-                        // activeDevice = selected // Don't set yet, wait for success
+                        val discovery = buildMountCandidates(selected)
+                        discovery.diagnostic?.let { Log.d("MainViewModel", it) }
 
-                        var partitions: List<BlockDeviceDriver> = selected.partitions
-                        var rawDriver: BlockDeviceDriver? = null
-
-                        if (partitions.isEmpty()) {
-                            val debug = StringBuilder()
-                            rawDriver = tryCreateRawDriver(selected, debug)
-
-                            if (rawDriver != null) {
-                                var manual = PartitionUtils.parseGpt(rawDriver)
-                                if (manual.isEmpty()) manual = PartitionUtils.parseMbr(rawDriver)
-                                partitions = manual
-                            } else if (debug.isNotEmpty()) {
-                                // Only emit logs if we fail completely later? Or just log?
-                                Log.d("MainViewModel", debug.toString())
+                        if (discovery.candidates.isEmpty()) {
+                            lastError = discovery.diagnostic ?: context.getString(R.string.error_no_partitions)
+                            try {
+                                selected.close()
+                            } catch (_: Exception) {
+                                // Best-effort cleanup for failed candidates.
                             }
-                        }
-
-                        val targets = if (partitions.isNotEmpty()) partitions else listOfNotNull(rawDriver)
-                        if (targets.isEmpty()) {
-                            selected.close() // Close device if no partitions found
                             continue
                         }
 
-                    for (physicalDriver in targets) {
-                        var localHandle: Long? = null
-                        try {
-                            val volSize = safeVolumeSize(physicalDriver)
-                            if (volSize <= 0) {
-                                lastError = "Unable to determine volume size"
-                                continue
-                            }
-
-                            val headerBytes = readBytes(physicalDriver, 0, HEADER_GROUP_SIZE)
-                            val backupHeaderBytes = if (volSize >= HEADER_GROUP_SIZE) {
-                                readBytes(physicalDriver, volSize - HEADER_GROUP_SIZE, HEADER_GROUP_SIZE)
-                            } else {
-                                null
-                            }
-
-                            if (isAllZeros(headerBytes)) {
-                                lastError = "Skipped: Header is all zeros"
-                                continue
-                            }
-
-                            if (isCommonFileSystem(headerBytes)) {
-                                lastError = "Skipped: Detected unencrypted filesystem"
-                                continue
-                            }
-
-                            val passwordCandidates = buildPasswordCandidates(password)
+                        for (candidate in discovery.candidates) {
+                            var localHandle: Long? = null
+                            val candidateLabel = formatCandidateLabel(candidate)
 
                             try {
-                                for ((index, pwd) in passwordCandidates.withIndex()) {
-                                    if (index > 0) _logs.emit("Trying trimmed password…")
+                                _logs.emit("Trying $candidateLabel")
 
-                                    val handle = RustNative.init(
-                                        pwd,
-                                        headerBytes,
-                                        pim,
-                                        0L, // partitionOffset (tweak offset) – normal volumes use 0
-                                        0L, // headerOffsetBias – headerBytes start at 0
-                                        protectionPassword,
-                                        protectionPim,
-                                        volSize,
-                                        backupHeaderBytes,
-                                    )
-
-                                    if (handle > 0) {
-                                        localHandle = handle
-                                        break
-                                    }
+                                val headerPlan = readHeaderPlan(candidate)
+                                if (headerPlan is HeaderPlan.Skip) {
+                                    lastError = "$candidateLabel: ${headerPlan.reason}"
+                                    Log.d("MainViewModel", lastError)
+                                    continue
                                 }
-                            } finally {
-                                for (pwd in passwordCandidates) {
-                                    if (pwd !== password) {
-                                        RustNative.clearByteArray(pwd)
-                                    }
+
+                                headerPlan as HeaderPlan.Attempt
+                                headerPlan.recoveryReason?.let {
+                                    _logs.emit("$candidateLabel: $it")
                                 }
-                            }
 
-                            if (localHandle == null || localHandle <= 0) {
-                                lastError = "Invalid password/PIM or not a VeraCrypt volume"
-                                continue
-                            }
+                                localHandle = openVolume(
+                                    candidate = candidate,
+                                    headerPlan = headerPlan,
+                                    password = password,
+                                    pim = pim,
+                                    protectionPassword = protectionPassword,
+                                    protectionPim = protectionPim,
+                                )
 
-                            rustHandle = localHandle
+                                if (localHandle == null || localHandle <= 0) {
+                                    lastError = "$candidateLabel: Invalid password/PIM or unsupported volume"
+                                    continue
+                                }
 
-                            val dataOffset = RustNative.getDataOffset(localHandle)
-                            val veracryptDriver = VeracryptBlockDevice(physicalDriver, localHandle, dataOffset)
+                                rustHandle = localHandle
 
-                            val fs: FileSystem = try {
-                                val dummyEntry = PartitionTableEntry(0x0C, 0, 0)
-                                FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
+                                val fs = mountFileSystem(candidate, localHandle)
+                                activeFileSystem = fs
+                                SessionManager.activeFileSystem = fs
+                                _connectionResult.emit(ConnectionResult.Success)
+                                success = true
+                                activeDevice = selected
+                                break
                             } catch (e: Exception) {
-                                val callback = FileSystemReadCallback(veracryptDriver)
-
-                                val fsHandle = RustNative.mountFs(localHandle, callback, volSize)
-                                if (fsHandle > 0) {
-                                    RustFileSystem(fsHandle, context.getString(R.string.root_title))
-                                } else {
-                                    throw IOException(context.getString(R.string.error_fs_detection))
-                                }
+                                lastError = "$candidateLabel: ${e.message ?: "Unknown error"}"
+                                Log.e("MainViewModel", "Mount failed for $candidateLabel", e)
+                                localHandle?.let { RustNative.close(it) }
+                                rustHandle = null
                             }
+                        }
 
-                            activeFileSystem = fs
-                            SessionManager.activeFileSystem = fs
-                            _connectionResult.emit(ConnectionResult.Success)
-                            success = true
-                            activeDevice = selected
+                        if (success) {
                             break
+                        }
+
+                        try {
+                            selected.close()
                         } catch (e: Exception) {
-                            lastError = e.message ?: "Unknown error"
-                            localHandle?.let { RustNative.close(it) }
-                            rustHandle = null
+                            Log.w("MainViewModel", "Failed to close USB device after unsuccessful mount", e)
                         }
                     }
-                    if (success) break
-                }
 
                     try {
                         val nativeLogs = RustNative.getLogs()
@@ -238,6 +276,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } finally {
                     RustNative.clearByteArray(password)
                 }
+            }
+        }
+    }
+
+    private suspend fun openVolume(
+        candidate: MountCandidate,
+        headerPlan: HeaderPlan.Attempt,
+        password: ByteArray,
+        pim: Int,
+        protectionPassword: ByteArray?,
+        protectionPim: Int,
+    ): Long? {
+        val passwordCandidates = buildPasswordCandidates(password)
+
+        try {
+            for ((index, pwd) in passwordCandidates.withIndex()) {
+                if (index > 0) {
+                    _logs.emit("Trying trimmed password on ${formatCandidateLabel(candidate)}...")
+                }
+
+                val handle = RustNative.init(
+                    pwd,
+                    headerPlan.primaryHeaderBytes,
+                    pim,
+                    0L, // Android exposes candidate-relative drivers to the current Rust API.
+                    0L, // Header buffers always begin at offset 0 within the chosen candidate.
+                    protectionPassword,
+                    protectionPim,
+                    candidate.volumeSize,
+                    headerPlan.backupHeaderBytes,
+                )
+
+                if (handle > 0) {
+                    return handle
+                }
+            }
+        } finally {
+            for (pwd in passwordCandidates) {
+                if (pwd !== password) {
+                    RustNative.clearByteArray(pwd)
+                }
+            }
+        }
+
+        return null
+    }
+
+    private fun mountFileSystem(candidate: MountCandidate, volumeHandle: Long): FileSystem {
+        val dataOffset = RustNative.getDataOffset(volumeHandle)
+        val veracryptDriver = VeracryptBlockDevice(candidate.driver, volumeHandle, dataOffset)
+
+        return try {
+            val dummyEntry = PartitionTableEntry(0x0C, 0, 0)
+            FileSystemFactory.createFileSystem(dummyEntry, veracryptDriver)
+        } catch (e: Exception) {
+            val callback = FileSystemReadCallback(veracryptDriver)
+            val fsHandle = RustNative.mountFs(volumeHandle, callback, candidate.volumeSize)
+            if (fsHandle > 0) {
+                RustFileSystem(fsHandle, context.getString(R.string.root_title))
+            } else {
+                throw IOException(context.getString(R.string.error_fs_detection))
             }
         }
     }
@@ -274,10 +373,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun buildMountCandidates(selected: UsbMassStorageDevice): CandidateDiscovery {
+        val autoCandidates = selected.partitions.mapIndexedNotNull { index, driver ->
+            buildCandidate(driver, "partition ${index + 1}")
+        }
+        if (autoCandidates.isNotEmpty()) {
+            return CandidateDiscovery(autoCandidates)
+        }
+
+        val debug = StringBuilder()
+        val rawDriver = tryCreateRawDriver(selected, debug)
+            ?: return CandidateDiscovery(emptyList(), debug.takeIf { it.isNotEmpty() }?.toString())
+
+        val manualCandidates = PartitionUtils.parseGpt(rawDriver)
+            .ifEmpty { PartitionUtils.parseMbr(rawDriver) }
+            .mapIndexedNotNull { index, driver ->
+                buildCandidate(driver, "manual partition ${index + 1}")
+            }
+
+        if (manualCandidates.isNotEmpty()) {
+            return CandidateDiscovery(manualCandidates, debug.takeIf { it.isNotEmpty() }?.toString())
+        }
+
+        val rawCandidate = buildCandidate(rawDriver, "whole device")
+        return if (rawCandidate != null) {
+            CandidateDiscovery(listOf(rawCandidate), debug.takeIf { it.isNotEmpty() }?.toString())
+        } else {
+            CandidateDiscovery(emptyList(), debug.takeIf { it.isNotEmpty() }?.toString())
+        }
+    }
+
+    private fun buildCandidate(driver: BlockDeviceDriver, description: String): MountCandidate? {
+        val volumeSize = safeVolumeSize(driver)
+        if (volumeSize <= 0) return null
+
+        val physicalStartOffset = (driver as? PartitionDriver)?.partitionOffset ?: 0L
+        return MountCandidate(
+            driver = driver,
+            description = description,
+            volumeSize = volumeSize,
+            physicalStartOffset = physicalStartOffset,
+        )
+    }
+
     private fun readBytes(driver: BlockDeviceDriver, offset: Long, size: Int): ByteArray {
+        if (size <= 0) return ByteArray(0)
+
         val buffer = ByteBuffer.allocate(size)
         driver.read(offset, buffer)
-        return buffer.array()
+        val bytesRead = buffer.position()
+
+        return when {
+            bytesRead <= 0 -> ByteArray(0)
+            bytesRead == size -> buffer.array()
+            else -> buffer.array().copyOf(bytesRead)
+        }
+    }
+
+    private fun readHeaderPlan(candidate: MountCandidate): HeaderPlan {
+        val primaryReadSize = minOf(candidate.volumeSize, HEADER_GROUP_SIZE.toLong()).toInt()
+        val primaryHeaderBytes = readBytes(candidate.driver, 0, primaryReadSize)
+        val backupHeaderBytes = if (candidate.volumeSize >= HEADER_GROUP_SIZE) {
+            readBytes(candidate.driver, candidate.volumeSize - HEADER_GROUP_SIZE, HEADER_GROUP_SIZE)
+        } else {
+            null
+        }
+
+        return planHeaderAttempt(primaryHeaderBytes, backupHeaderBytes)
     }
 
     private fun buildPasswordCandidates(password: ByteArray): List<ByteArray> {
@@ -296,28 +458,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun isCommonFileSystem(bytes: ByteArray): Boolean {
-        if (bytes.size < 512) return false
-
-        fun hasString(offset: Int, value: String): Boolean {
-            if (offset + value.length > bytes.size) return false
-            for (i in value.indices) {
-                if (bytes[offset + i] != value[i].code.toByte()) return false
-            }
-            return true
-        }
-
-        return hasString(3, "NTFS") ||
-            hasString(3, "EXFAT") ||
-            hasString(82, "FAT32") ||
-            hasString(54, "FAT16")
+        return isCommonFileSystemHeader(bytes)
     }
 
     private fun isAllZeros(bytes: ByteArray): Boolean {
-        val checkLen = minOf(bytes.size, 512)
-        for (i in 0 until checkLen) {
-            if (bytes[i] != 0.toByte()) return false
+        return isAllZeroHeader(bytes)
+    }
+
+    private fun formatCandidateLabel(candidate: MountCandidate): String {
+        return if (candidate.physicalStartOffset > 0) {
+            "${candidate.description} @ byte ${candidate.physicalStartOffset}"
+        } else {
+            candidate.description
         }
-        return true
     }
 
     private fun tryCreateRawDriver(device: UsbMassStorageDevice, debug: StringBuilder): BlockDeviceDriver? {

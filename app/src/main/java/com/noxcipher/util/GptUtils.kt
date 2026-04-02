@@ -6,36 +6,36 @@ import java.nio.ByteOrder
 
 class PartitionDriver(
     private val parent: BlockDeviceDriver,
-    private val offset: Long,
-    private val length: Long
+    val partitionOffset: Long,
+    val partitionLength: Long
 ) : BlockDeviceDriver {
     override val blockSize: Int get() = parent.blockSize
-    override val blocks: Long get() = length / blockSize
+    override val blocks: Long get() = partitionLength / blockSize
 
     override fun init() {
         // Parent already init
     }
 
     override fun read(deviceOffset: Long, buffer: ByteBuffer) {
-        if (deviceOffset + buffer.remaining() > length) {
-            throw IllegalArgumentException("Read out of bounds: offset=$deviceOffset, len=${buffer.remaining()}, partitionLen=$length")
+        if (deviceOffset + buffer.remaining() > partitionLength) {
+            throw IllegalArgumentException("Read out of bounds: offset=$deviceOffset, len=${buffer.remaining()}, partitionLen=$partitionLength")
         }
         // Ensure we don't read past end
         val limit = buffer.limit()
         val remaining = buffer.remaining()
-        if (deviceOffset + remaining > length) {
+        if (deviceOffset + remaining > partitionLength) {
              // Adjust limit? No, we can't easily.
              // Just let it fail if parent fails, or trust caller.
         }
         
-        parent.read(offset + deviceOffset, buffer)
+        parent.read(partitionOffset + deviceOffset, buffer)
     }
 
     override fun write(deviceOffset: Long, buffer: ByteBuffer) {
-        if (deviceOffset + buffer.remaining() > length) {
+        if (deviceOffset + buffer.remaining() > partitionLength) {
             throw IllegalArgumentException("Write out of bounds")
         }
-        parent.write(offset + deviceOffset, buffer)
+        parent.write(partitionOffset + deviceOffset, buffer)
     }
 
     // override fun flush() {
